@@ -23,10 +23,20 @@
             开始校正
           </PdfButton>
         </div>
+        
+        <!-- 新增的PDF书签功能按钮 -->
+        <div v-if="selectedFile && !isProcessing" class="bookmark-buttons">
+          <PdfButton variant="outline-secondary" @click="previewBookmarks" fullWidth>
+            预览目录结构
+          </PdfButton>
+          <PdfButton variant="primary" @click="addBookmarksToPdf" :loading="isBookmarkProcessing" fullWidth>
+            添加书签并下载
+          </PdfButton>
+        </div>
       </div>
 
       <PdfProgress
-        :show="isProcessing"
+        :show="isProcessing || isBookmarkProcessing"
         type="bar"
         :progress="progressValue"
         :message="progressMessage"
@@ -129,6 +139,14 @@
         </div>
       </div>
     </PdfModal>
+    
+    <!-- 目录结构预览模态框 -->
+    <PdfModal v-model:visible="showTocModal" title="PDF目录结构预览" content-class="toc-modal">
+      <div class="toc-preview">
+        <pre v-if="tocContent">{{ tocContent }}</pre>
+        <div v-else>加载中...</div>
+      </div>
+    </PdfModal>
   </div>
 </template>
 
@@ -151,9 +169,11 @@ export default {
     return {
       selectedFile: null,
       isProcessing: false,
+      isBookmarkProcessing: false,
       correctedFile: null,
       errorMessage: '',
       showPreviewModal: false,
+      showTocModal: false,
       compareMode: false,
       previewTitle: '',
       originalPdfUrl: null,
@@ -169,7 +189,8 @@ export default {
       processSteps: [], // 处理步骤数组
       eventSource: null,
       totalBatches: 0, // 总批次数
-      currentBatch: 0  // 当前批次数
+      currentBatch: 0,  // 当前批次数
+      tocContent: null
     };
   },
   methods: {
@@ -421,6 +442,111 @@ export default {
       }
     },
 
+    // 预览PDF目录结构
+    async previewBookmarks() {
+      if (!this.selectedFile) {
+        this.errorMessage = '未选择文件';
+        return;
+      }
+
+      this.isBookmarkProcessing = true;
+      this.errorMessage = '';
+      this.tocContent = null;
+      this.showTocModal = true;
+
+      const formData = new FormData();
+      formData.append('file', this.selectedFile);
+
+      try {
+        const response = await axios.post('http://localhost:8080/api/pdf/preview-toc', formData, {
+          headers: {
+            'Content-Type': 'multipart/form-data'
+          }
+        });
+
+        if (response.data) {
+          // 检查返回的数据是否已经是JSON对象
+          if (typeof response.data === 'object') {
+            this.tocContent = JSON.stringify(response.data, null, 2);
+          } else {
+            // 如果是字符串，则尝试解析为JSON
+            try {
+              this.tocContent = JSON.stringify(JSON.parse(response.data), null, 2);
+            } catch (parseError) {
+              // 如果解析失败，直接显示原始数据
+              this.tocContent = response.data;
+            }
+          }
+        } else {
+          this.tocContent = '未获取到目录结构';
+        }
+      } catch (error) {
+        console.error('预览目录结构失败:', error);
+        if (error.response) {
+          // 服务器返回了错误响应
+          this.errorMessage = '预览目录结构失败: ' + (error.response.data || error.response.statusText || '服务器错误');
+        } else if (error.request) {
+          // 请求已发出但没有收到响应
+          this.errorMessage = '预览目录结构失败: 无法连接到服务器，请检查网络连接或服务器状态';
+        } else {
+          // 其他错误
+          this.errorMessage = '预览目录结构失败: ' + (error.message || '未知错误');
+        }
+        this.showTocModal = false;
+      } finally {
+        this.isBookmarkProcessing = false;
+      }
+    },
+
+    // 添加书签到PDF并下载
+    async addBookmarksToPdf() {
+      if (!this.selectedFile) {
+        this.errorMessage = '未选择文件';
+        return;
+      }
+
+      this.isBookmarkProcessing = true;
+      this.errorMessage = '';
+
+      const formData = new FormData();
+      formData.append('file', this.selectedFile);
+
+      try {
+        const response = await axios.post('http://localhost:8080/api/pdf/add-bookmarks', formData, {
+          responseType: 'blob',
+          headers: {
+            'Content-Type': 'multipart/form-data'
+          }
+        });
+
+        // 获取文件名
+        const disposition = response.headers['content-disposition'];
+        let filename = 'bookmarked_document.pdf';
+        if (disposition && disposition.indexOf('attachment') !== -1) {
+          const filenameRegex = /filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/;
+          const matches = filenameRegex.exec(disposition);
+          if (matches != null && matches[1]) {
+            filename = matches[1].replace(/['"]/g, '');
+          }
+        }
+
+        // 下载文件
+        const url = window.URL.createObjectURL(new Blob([response.data]));
+        const link = document.createElement('a');
+        link.href = url;
+        link.setAttribute('download', filename);
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        window.URL.revokeObjectURL(url);
+      } catch (error) {
+        console.error('添加书签失败:', error);
+        this.errorMessage = '添加书签失败: ' + (error.message || '未知错误');
+      } finally {
+        this.isBookmarkProcessing = false;
+      }
+    },
+
     reset() {
       this.selectedFile = null;
       this.correctedFile = null;
@@ -520,8 +646,18 @@ html, body {
   margin-top: 30px;
 }
 
+.bookmark-buttons {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 15px;
+  margin-top: 20px;
+  padding-top: 20px;
+  border-top: 1px solid #eee;
+}
+
 @media (max-width: 768px) {
-  .action-buttons {
+  .action-buttons,
+  .bookmark-buttons {
     grid-template-columns: 1fr;
   }
 
@@ -699,5 +835,30 @@ html, body {
   50% {
     opacity: 0.5;
   }
+}
+
+/* 目录结构预览模态框 */
+.toc-modal {
+  width: 80vw;
+  height: 80vh;
+}
+
+.toc-preview {
+  padding: 20px;
+  height: 100%;
+  overflow: auto;
+}
+
+.toc-preview pre {
+  background: #f8f9fa;
+  padding: 15px;
+  border-radius: 8px;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  font-family: 'Courier New', monospace;
+  font-size: 14px;
+  line-height: 1.5;
+  color: #333;
+  margin: 0;
 }
 </style>
