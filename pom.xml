@@ -64,6 +64,13 @@
             <version>2.11.0</version>
         </dependency>
 
+        <!-- Tesseract OCR (用于扫描件识别) -->
+        <dependency>
+            <groupId>net.sourceforge.tess4j</groupId>
+            <artifactId>tess4j</artifactId>
+            <version>5.4.0</version>
+        </dependency>
+
         <!-- Lombok (可选，简化代码) -->
         <dependency>
             <groupId>org.projectlombok</groupId>

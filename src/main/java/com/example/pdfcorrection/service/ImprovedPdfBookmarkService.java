@@ -6,12 +6,20 @@ import com.itextpdf.kernel.pdf.canvas.parser.PdfCanvasProcessor;
 import com.itextpdf.kernel.pdf.canvas.parser.data.TextRenderInfo;
 import com.itextpdf.kernel.pdf.canvas.parser.listener.IEventListener;
 import com.itextpdf.kernel.pdf.navigation.PdfExplicitDestination;
+import net.sourceforge.tess4j.Tesseract;
+import net.sourceforge.tess4j.TesseractException;
+import org.apache.pdfbox.pdmodel.PDDocument;
+import org.apache.pdfbox.rendering.ImageType;
+import org.apache.pdfbox.rendering.PDFRenderer;
+import org.apache.pdfbox.text.PDFTextStripper;
 import org.springframework.core.io.ByteArrayResource;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
+import java.awt.image.BufferedImage;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.io.File;
 import java.io.IOException;
 import java.util.*;
 import java.util.regex.Matcher;
@@ -52,9 +60,29 @@ public class ImprovedPdfBookmarkService {
             if (items.isEmpty()) {
                 items = new StrategyLayoutStructure().extract(pdf);
             }
-
-            return items;
+        } catch (Exception e) {
+            System.err.println("iText extraction failed: " + e.getMessage());
         }
+
+        // 4. 策略C：PDFBox 兜底 (解决 iText 字体解析崩溃问题)
+        if (items == null || items.isEmpty()) {
+            try {
+                items = new StrategyPdfBox().extract(file);
+            } catch (Exception e) {
+                System.err.println("PDFBox extraction failed: " + e.getMessage());
+            }
+        }
+
+        // 5. 策略D：OCR 兜底 (针对扫描件)
+        if (items == null || items.isEmpty()) {
+            try {
+                items = new StrategyOcr().extract(file);
+            } catch (Exception e) {
+                System.err.println("OCR extraction failed: " + e.getMessage());
+            }
+        }
+
+        return items != null ? items : new ArrayList<>();
     }
 
     /* ======================= 1. 改进后的目录页定位逻辑 ======================= */
@@ -108,8 +136,13 @@ public class ImprovedPdfBookmarkService {
      */
     private List<TextLine> extractLinesWithLayout(PdfDocument pdf, int pageNum) {
         StyledTextExtractor extractor = new StyledTextExtractor();
-        new PdfCanvasProcessor(extractor).processPageContent(pdf.getPage(pageNum));
-        extractor.finish();
+        try {
+            new PdfCanvasProcessor(extractor).processPageContent(pdf.getPage(pageNum));
+            extractor.finish();
+        } catch (Exception e) {
+            // 捕获字体解析异常(如 NullPointerException in PdfType0Font)，防止整个流程失败
+            System.err.println("Warning: Failed to extract layout from page " + pageNum + ": " + e.getMessage());
+        }
         return extractor.getLines();
     }
 
@@ -252,6 +285,234 @@ public class ImprovedPdfBookmarkService {
         }
     }
 
+    /* ======================= 策略C：基于 PDFBox 的兜底提取 ======================= */
+
+    static class StrategyPdfBox {
+        
+        static class RawToc {
+            String title;
+            int logicalPage;
+            RawToc(String t, int p) { title = t; logicalPage = p; }
+        }
+
+        public List<TocItem> extract(MultipartFile file) throws IOException {
+            List<TocItem> items = new ArrayList<>();
+            try (PDDocument doc = PDDocument.load(file.getInputStream())) {
+                PDFTextStripper stripper = new PDFTextStripper();
+                stripper.setSortByPosition(true);
+
+                int maxScan = Math.min(20, doc.getNumberOfPages());
+                List<String> tocLines = new ArrayList<>();
+                int tocStartPage = -1;
+
+                // 1. 寻找目录页
+                for (int i = 1; i <= maxScan; i++) {
+                    stripper.setStartPage(i);
+                    stripper.setEndPage(i);
+                    String text = stripper.getText(doc);
+
+                    if (text.contains("目录") || text.toLowerCase().contains("contents")) {
+                        tocStartPage = i;
+                        tocLines.addAll(Arrays.asList(text.split("\\r?\\n")));
+                        // 尝试读取后续页
+                        for (int j = i + 1; j <= maxScan; j++) {
+                            stripper.setStartPage(j);
+                            stripper.setEndPage(j);
+                            String nextText = stripper.getText(doc);
+                            // 简单判断：如果包含大量 "......数字" 则认为是续页
+                            if (countTocLikeLines(nextText) > 3) {
+                                tocLines.addAll(Arrays.asList(nextText.split("\\r?\\n")));
+                            } else {
+                                break;
+                            }
+                        }
+                        break;
+                    }
+                }
+
+                if (tocLines.isEmpty()) return items;
+
+                // 2. 解析行
+                List<RawToc> raws = new ArrayList<>();
+                for (String line : tocLines) {
+                    line = line.trim();
+                    // 匹配 "标题......页码"
+                    Matcher m1 = Pattern.compile("^(.*?)(?:\\.{2,}|…|—|\\s{2,})(\\d+)$").matcher(line);
+                    if (m1.find()) {
+                        raws.add(new RawToc(m1.group(1).trim(), Integer.parseInt(m1.group(2))));
+                        continue;
+                    }
+                    
+                    // 匹配 "1. 标题 5" 这种格式
+                    if (line.matches("^\\d+\\..+\\s+\\d+$")) {
+                         String[] parts = line.split("\\s+");
+                         String pageStr = parts[parts.length-1];
+                         if (pageStr.matches("\\d+")) {
+                             String title = line.substring(0, line.lastIndexOf(pageStr)).trim();
+                             raws.add(new RawToc(title, Integer.parseInt(pageStr)));
+                         }
+                    }
+                }
+
+                // 3. 计算偏移量
+                int offset = 0;
+                if (!raws.isEmpty()) {
+                    offset = calculatePageOffset(doc, raws);
+                }
+
+                for (RawToc r : raws) {
+                    int physicalPage = r.logicalPage + offset;
+                    if (physicalPage > 0 && physicalPage <= doc.getNumberOfPages()) {
+                        TocItem item = new TocItem();
+                        item.title = r.title;
+                        item.page = physicalPage;
+                        item.level = 1; 
+                        items.add(item);
+                    }
+                }
+            }
+            return items;
+        }
+
+        private int countTocLikeLines(String text) {
+            int count = 0;
+            for (String line : text.split("\\n")) {
+                if (line.trim().matches(".*\\d+$") && line.length() > 5) count++;
+            }
+            return count;
+        }
+
+        private int calculatePageOffset(PDDocument doc, List<RawToc> raws) {
+             Map<Integer, Integer> votes = new HashMap<>();
+             PDFTextStripper stripper = new PDFTextStripper();
+             
+             try {
+                 for (int i = 0; i < Math.min(raws.size(), 3); i++) {
+                     RawToc item = raws.get(i);
+                     for (int k = -20; k <= 20; k++) {
+                         int guess = item.logicalPage + k;
+                         if (guess < 1 || guess > doc.getNumberOfPages()) continue;
+                         
+                         stripper.setStartPage(guess);
+                         stripper.setEndPage(guess);
+                         String content = stripper.getText(doc);
+                         
+                         if (content.replaceAll("\\s", "").contains(item.title.replaceAll("\\s", ""))) {
+                             votes.merge(k, 1, Integer::sum);
+                         }
+                     }
+                 }
+             } catch (IOException e) {
+                 return 0;
+             }
+             
+             return votes.entrySet().stream()
+                    .max(Map.Entry.comparingByValue())
+                    .map(Map.Entry::getKey)
+                    .orElse(0);
+        }
+    }
+
+    /* ======================= 策略D：基于 OCR 的扫描件提取 ======================= */
+
+    static class StrategyOcr {
+        public List<TocItem> extract(MultipartFile file) throws IOException, TesseractException {
+            List<TocItem> items = new ArrayList<>();
+            
+            // 初始化 Tesseract
+            Tesseract tesseract = new Tesseract();
+            // 尝试设置数据路径，如果环境变量没设，默认使用项目下的 tessdata
+            String datapath = System.getenv("TESSDATA_PREFIX");
+            if (datapath == null) {
+                // 尝试多个可能的路径
+                if (new File("tessdata").exists()) {
+                    datapath = new File("tessdata").getAbsolutePath();
+                } else if (new File("src/main/resources/tessdata").exists()) {
+                    datapath = new File("src/main/resources/tessdata").getAbsolutePath();
+                } else {
+                    // 最后的兜底，假设用户安装在 C 盘 (Windows 常见路径)
+                    datapath = "C:\\Program Files\\Tesseract-OCR\\tessdata";
+                }
+            }
+            tesseract.setDatapath(datapath);
+            tesseract.setLanguage("chi_sim+eng"); // 默认尝试中文+英文
+
+            try (PDDocument doc = PDDocument.load(file.getInputStream())) {
+                PDFRenderer renderer = new PDFRenderer(doc);
+                int maxScan = Math.min(20, doc.getNumberOfPages());
+                
+                List<String> tocLines = new ArrayList<>();
+                int tocStartPage = -1;
+
+                // 1. 寻找目录页 (OCR)
+                for (int i = 0; i < maxScan; i++) { // PDFBox page index starts at 0 for rendering
+                    try {
+                        BufferedImage image = renderer.renderImageWithDPI(i, 150); // 150 DPI 足够识别目录
+                        String text = tesseract.doOCR(image);
+    
+                        if (text.contains("目录") || text.toLowerCase().contains("contents")) {
+                            tocStartPage = i;
+                            tocLines.addAll(Arrays.asList(text.split("\\r?\\n")));
+                            
+                            // 尝试读取后续页
+                            for (int j = i + 1; j < maxScan; j++) {
+                                BufferedImage nextImage = renderer.renderImageWithDPI(j, 150);
+                                String nextText = tesseract.doOCR(nextImage);
+                                if (countTocLikeLines(nextText) > 3) {
+                                    tocLines.addAll(Arrays.asList(nextText.split("\\r?\\n")));
+                                } else {
+                                    break;
+                                }
+                            }
+                            break;
+                        }
+                    } catch (Exception e) {
+                        // 单页 OCR 失败不影响整体
+                        continue;
+                    }
+                }
+
+                if (tocLines.isEmpty()) return items;
+
+                // 2. 解析行 (复用 PDFBox 策略的逻辑)
+                List<StrategyPdfBox.RawToc> raws = new ArrayList<>();
+                for (String line : tocLines) {
+                    line = line.trim();
+                    // OCR 结果可能包含杂乱空格，稍微放宽正则
+                    Matcher m1 = Pattern.compile("^(.*?)(?:\\.{2,}|…|—|\\s{2,})(\\d+)$").matcher(line);
+                    if (m1.find()) {
+                        raws.add(new StrategyPdfBox.RawToc(m1.group(1).trim(), Integer.parseInt(m1.group(2))));
+                        continue;
+                    }
+                }
+
+                // 3. 简单转换 (OCR 很难做精确的页码偏移校准，因为无法搜索正文文本)
+                // 这里假设 OCR 识别出的页码就是物理页码，或者做一个简单的 +0 处理
+                for (StrategyPdfBox.RawToc r : raws) {
+                    int physicalPage = r.logicalPage; // 暂不校准
+                    if (physicalPage > 0 && physicalPage <= doc.getNumberOfPages()) {
+                        TocItem item = new TocItem();
+                        item.title = r.title;
+                        item.page = physicalPage;
+                        item.level = 1;
+                        items.add(item);
+                    }
+                }
+            } catch (UnsatisfiedLinkError e) {
+                System.err.println("Tesseract native library not found: " + e.getMessage());
+            }
+            return items;
+        }
+
+        private int countTocLikeLines(String text) {
+            int count = 0;
+            for (String line : text.split("\\n")) {
+                if (line.trim().matches(".*\\d+$") && line.length() > 5) count++;
+            }
+            return count;
+        }
+    }
+
     /* ======================= 策略A：基于目录页的精确提取 ======================= */
 
     static class StrategyExplicitToc {
@@ -266,8 +527,13 @@ public class ImprovedPdfBookmarkService {
 
             for (Integer p : pages) {
                 StyledTextExtractor extractor = new StyledTextExtractor();
-                new PdfCanvasProcessor(extractor).processPageContent(pdf.getPage(p));
-                extractor.finish();
+                try {
+                    new PdfCanvasProcessor(extractor).processPageContent(pdf.getPage(p));
+                    extractor.finish();
+                } catch (Exception e) {
+                    System.err.println("Warning: Failed to process page " + p + " in explicit TOC strategy: " + e.getMessage());
+                    continue;
+                }
 
                 List<TextLine> lines = extractor.getLines();
 
@@ -430,8 +696,13 @@ public class ImprovedPdfBookmarkService {
             // 2. 全文扫描
             for (int p = 1; p <= totalPages; p++) {
                 StyledTextExtractor extractor = new StyledTextExtractor();
-                new PdfCanvasProcessor(extractor).processPageContent(pdf.getPage(p));
-                extractor.finish();
+                try {
+                    new PdfCanvasProcessor(extractor).processPageContent(pdf.getPage(p));
+                    extractor.finish();
+                } catch (Exception e) {
+                    System.err.println("Warning: Failed to process page " + p + " in layout strategy: " + e.getMessage());
+                    continue;
+                }
 
                 List<TextLine> lines = extractor.getLines();
                 for (int i = 0; i < lines.size(); i++) {
