@@ -190,12 +190,16 @@ export default {
       eventSource: null,
       totalBatches: 0, // 总批次数
       currentBatch: 0,  // 当前批次数
-      tocContent: null
+      tocContent: null,
+      lastProcessedFile: null // 用于缓存目录预览的文件引用
     };
   },
   methods: {
     onFileSelect() {
       this.errorMessage = '';
+      // 文件改变时，清空目录缓存
+      this.tocContent = null;
+      this.lastProcessedFile = null;
     },
 
     showPreview() {
@@ -449,6 +453,12 @@ export default {
         return;
       }
 
+      // 如果已经有缓存且文件未变，直接显示
+      if (this.tocContent && this.lastProcessedFile === this.selectedFile) {
+        this.showTocModal = true;
+        return;
+      }
+
       this.isBookmarkProcessing = true;
       this.errorMessage = '';
       this.tocContent = null;
@@ -477,6 +487,8 @@ export default {
               this.tocContent = response.data;
             }
           }
+          // 缓存当前文件引用
+          this.lastProcessedFile = this.selectedFile;
         } else {
           this.tocContent = '未获取到目录结构';
         }
@@ -507,9 +519,24 @@ export default {
 
       this.isBookmarkProcessing = true;
       this.errorMessage = '';
+      this.progressValue = 0;
+      
+      // 模拟进度条，因为这个接口返回文件流，无法使用SSE
+      if (this.progressInterval) clearInterval(this.progressInterval);
+      this.progressInterval = setInterval(() => {
+        if (this.progressValue < 90) {
+          this.progressValue += Math.floor(Math.random() * 10);
+          if (this.progressValue > 90) this.progressValue = 90;
+        }
+      }, 200);
 
       const formData = new FormData();
       formData.append('file', this.selectedFile);
+      
+      // 如果有缓存的目录结构且文件未变，传给后端，避免重复扫描
+      if (this.tocContent && this.lastProcessedFile === this.selectedFile) {
+        formData.append('tocJson', this.tocContent);
+      }
 
       try {
         const response = await axios.post('http://localhost:8080/api/pdf/add-bookmarks', formData, {
@@ -518,6 +545,8 @@ export default {
             'Content-Type': 'multipart/form-data'
           }
         });
+        
+        this.progressValue = 100;
 
         // 获取文件名
         const disposition = response.headers['content-disposition'];
@@ -544,6 +573,10 @@ export default {
         this.errorMessage = '添加书签失败: ' + (error.message || '未知错误');
       } finally {
         this.isBookmarkProcessing = false;
+        if (this.progressInterval) {
+          clearInterval(this.progressInterval);
+          this.progressInterval = null;
+        }
       }
     },
 
@@ -557,6 +590,8 @@ export default {
       this.processSteps = [];
       this.totalBatches = 0;
       this.currentBatch = 0;
+      this.tocContent = null;
+      this.lastProcessedFile = null;
       
       // 关闭事件源
       if (this.eventSource) {
