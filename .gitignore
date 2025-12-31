@@ -66,3 +66,9 @@ logs/
 
 ### IDE - IntelliJ IDEA (complete) ###
 /.idea/
+
+PDFS
+tessdata
+
+
+src/main/resources/application.properties
