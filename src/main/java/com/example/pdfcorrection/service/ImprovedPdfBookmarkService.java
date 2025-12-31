@@ -791,6 +791,12 @@ public class ImprovedPdfBookmarkService {
                 // 3. 动态校准页码 (Dynamic Page Alignment)
                 // 使用 VQA 模式逐章校准，解决缺页导致的偏移量变化问题
                 if (!raws.isEmpty()) {
+                    // 再次清洗所有标题，确保没有页码后缀残留，否则 VQA 会失败
+                    for (StrategyPdfBox.RawToc r : raws) {
+                        if (r.title != null) {
+                            r.title = r.title.replaceAll("[…\\._—\\s]+\\d+$", "").trim();
+                        }
+                    }
                     alignPageNumbers(doc, raws, ocrEngine);
                 }
 
@@ -938,15 +944,22 @@ public class ImprovedPdfBookmarkService {
                 currentOffset = detectedOffsets.iterator().next();
             }
 
+            int lastLogicalPage = -1;
+
             for (int i = 0; i < raws.size(); i++) {
                 StrategyPdfBox.RawToc item = raws.get(i);
                 if (item.logicalPage <= 0) continue;
 
+                // 检测页码倒退或重复 (通常意味着进入了新的编码区域，如前言->正文)
+                // 此时偏移量可能会发生较大变化，需要扩大搜索范围
+                boolean isPageReset = (lastLogicalPage != -1 && item.logicalPage <= lastLogicalPage);
+                int searchRange = isPageReset ? 10 : 2;
+
                 // 使用当前偏移量进行预测
                 int predictedPhys = item.logicalPage + currentOffset;
                 
-                // 在预测位置附近小范围搜索 (+/- 2)
-                int confirmedOffset = findOffsetForTitle(renderer, ocrEngine, item.title, item.logicalPage, currentOffset, 2, totalPages);
+                // 在预测位置附近搜索
+                int confirmedOffset = findOffsetForTitle(renderer, ocrEngine, item.title, item.logicalPage, currentOffset, searchRange, totalPages);
                 
                 if (confirmedOffset != -999) {
                     item.physicalPage = item.logicalPage + confirmedOffset;
@@ -956,6 +969,8 @@ public class ImprovedPdfBookmarkService {
                     item.physicalPage = predictedPhys;
                     System.out.println("DEBUG: Not Found [" + item.title + "], using prediction -> Phys " + item.physicalPage);
                 }
+
+                lastLogicalPage = item.logicalPage;
             }
         }
 
@@ -1045,6 +1060,9 @@ public class ImprovedPdfBookmarkService {
                     for (Map<String, Object> map : list) {
                         if (map.containsKey("title")) {
                             String title = String.valueOf(map.get("title"));
+                            // 强力清洗标题：去除末尾的页码后缀 (如 "......001")
+                            title = title.replaceAll("[…\\._—\\s]+\\d+$", "").trim();
+                            
                             int page = -1;
                             if (map.containsKey("page")) {
                                 Object pageObj = map.get("page");
