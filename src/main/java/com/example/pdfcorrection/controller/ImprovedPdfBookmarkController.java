@@ -2,6 +2,8 @@ package com.example.pdfcorrection.controller;
 
 import com.example.pdfcorrection.service.ImprovedPdfBookmarkService;
 import com.example.pdfcorrection.service.ImprovedPdfBookmarkService.TocItem;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -19,6 +21,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.ArrayList;
 
 /**
  * PDF目录书签控制器 - 改进版
@@ -30,8 +33,8 @@ public class ImprovedPdfBookmarkController {
 
     private static final Logger logger = LoggerFactory.getLogger(ImprovedPdfBookmarkController.class);
 
-    // 文件大小限制 (50MB)
-    private static final long MAX_FILE_SIZE = 50 * 1024 * 1024;
+    // 文件大小限制 (500MB)
+    private static final long MAX_FILE_SIZE = 500 * 1024 * 1024;
 
     @Autowired
     private ImprovedPdfBookmarkService pdfBookmarkService;
@@ -42,10 +45,13 @@ public class ImprovedPdfBookmarkController {
     /**
      * 上传PDF文件并自动识别插入目录书签
      * @param file 上传的PDF文件
+     * @param tocJson 可选的目录结构JSON，如果提供则直接使用，不再重新识别
      * @return 处理后的PDF文件
      */
     @PostMapping(value = "/add-bookmarks", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
-    public ResponseEntity<?> addBookmarksToPdf(@RequestParam("file") MultipartFile file) {
+    public ResponseEntity<?> addBookmarksToPdf(
+            @RequestParam("file") MultipartFile file,
+            @RequestParam(value = "tocJson", required = false) String tocJson) {
         long startTime = System.currentTimeMillis();
 
         try {
@@ -62,7 +68,33 @@ public class ImprovedPdfBookmarkController {
                     file.getOriginalFilename(), file.getSize());
 
             // 处理PDF并添加书签
-            byte[] resource = pdfBookmarkService.processAndAddBookmarks(file);
+            byte[] resource;
+            if (tocJson != null && !tocJson.trim().isEmpty()) {
+                try {
+                    // 兼容处理：支持直接的 List<TocItem> 或包含 tableOfContents 字段的包装对象
+                    JsonNode rootNode = objectMapper.readTree(tocJson);
+                    List<TocItem> providedToc = new ArrayList<>();
+                    
+                    if (rootNode.isArray()) {
+                        providedToc = objectMapper.convertValue(rootNode, new TypeReference<List<TocItem>>(){});
+                    } else if (rootNode.has("tableOfContents") && rootNode.get("tableOfContents").isArray()) {
+                        providedToc = objectMapper.convertValue(rootNode.get("tableOfContents"), new TypeReference<List<TocItem>>(){});
+                    } else {
+                        logger.warn("Unknown TOC JSON structure, trying direct parse as fallback");
+                        providedToc = objectMapper.readValue(tocJson, new TypeReference<List<TocItem>>(){});
+                    }
+                    
+                    logger.info("Using provided TOC with {} items", providedToc.size());
+                    resource = pdfBookmarkService.processAndAddBookmarks(file, providedToc);
+                } catch (Exception e) {
+                    logger.warn("Failed to parse provided TOC JSON, falling back to extraction. Error: {}", e.getMessage());
+                    // 打印部分 JSON 以便调试 (截取前200字符)
+                    logger.debug("Received JSON snippet: {}", tocJson.length() > 200 ? tocJson.substring(0, 200) : tocJson);
+                    resource = pdfBookmarkService.processAndAddBookmarks(file);
+                }
+            } else {
+                resource = pdfBookmarkService.processAndAddBookmarks(file);
+            }
 
             long duration = System.currentTimeMillis() - startTime;
             logger.info("PDF processed successfully in {} ms", duration);
