@@ -56,7 +56,7 @@ public class ImprovedPdfBookmarkService {
 
 
     // @Value("${pdf.ocr.prompt:请识别图片中的目录内容。将结果作为包含 'title' 和 'page' 字段的 JSON 对象数组返回。示例：[{'title': '第一章', 'page': 10}]。如果这不是目录页，请返回 []。仅输出 JSON 格式，不要包含 Markdown 标记（如 ```json）。也不必包括 title 或者 page 为空的项。}")
-    @Value("${pdf.ocr.prompt:请识别图片中的目录内容。请严格按照图片中的顺序，输出一个扁平的 JSON 数组。每个元素包含 \'title\' (章节标题) 和 \'page\' (页码) 两个字段。每个元素占据一行。如果某行是章节标题但没有页码（如\"第一部\"），page 字段请留空字符串 \"\"。不要尝试构建嵌套结构，不要输出 Markdown 标记。示例：[{\"title\": \"第一章\", \"page\": \"10\"}, {\"title\": \"1.1 节\", \"page\": \"12\"}]。}")
+    @Value("${pdf.ocr.prompt:请识别图片中的目录内容。请严格按照图片中的顺序，输出一个扁平的 JSON 数组。每个元素包含 'title' (完整的章节标题，必须包含章节编号，如'1.1 绪论'，或'第一章 标题')、'page' (页码) 和 'level' (层级，整数，1表示一级标题，2表示二级标题，以此类推) 三个字段。\\n**关键要求**：\\n1. **完整性**：绝对不要遗漏章节编号！例如图片显示 '1.1.1 数据结构'，title 必须是 '1.1.1 数据结构'。\\n2. **层级判断** (综合判断)：\\n   - **语义编号** (优先)：'第一部/编' > '第一章' > '第一节'。例如：如果有'第一部'，则'第一部'是Level 1，'第一章'是Level 2。如果没有'部'，则'第一章'是Level 1。\\n   - **缩进**：在编号不明确时，缩进越深 level 越大。\\n   - **字体**：字号大或加粗的通常层级更高。\\n3. **页码**：如果某行没有页码，page 字段留空字符串。\\n不要输出 Markdown 标记，只输出 JSON。}")
     private String ocrPrompt;
 
 
@@ -115,7 +115,7 @@ public class ImprovedPdfBookmarkService {
         if (items == null || items.isEmpty()) {
             try {
                 if ("aliyun".equalsIgnoreCase(ocrProvider) || "deepseek".equalsIgnoreCase(ocrProvider)) {
-                    System.out.println("Using API OCR Strategy (" + ocrProvider + ")...");
+                    System.out.println("Using API OCR Strategy (" + apiModel + ")...");
                     items = new StrategyOcr(new OpenAiCompatibleEngine(apiKey, apiBaseUrl, apiModel, ocrPrompt, restTemplate)).extract(file);
                 } else {
                     System.out.println("Using Local Tesseract OCR Strategy...");
@@ -339,6 +339,7 @@ public class ImprovedPdfBookmarkService {
             int logicalPage;
             int physicalPage = -1; // 新增：实际物理页码
             boolean hasExplicitPage = false;
+            int level = 1; // 新增：层级
             RawToc(String t, int p) { title = t; logicalPage = p; }
         }
 
@@ -468,6 +469,14 @@ public class ImprovedPdfBookmarkService {
         default String doOCR(BufferedImage image, String promptOverride) throws Exception {
             return doOCR(image);
         }
+        // 新增：支持批量图片识别 (不拼接，作为多图输入)
+        default String doOCR(List<BufferedImage> images, String promptOverride) throws Exception {
+            StringBuilder sb = new StringBuilder();
+            for (BufferedImage img : images) {
+                sb.append(doOCR(img, promptOverride)).append("\n");
+            }
+            return sb.toString();
+        }
     }
 
     static class TesseractEngine implements OcrEngine {
@@ -517,10 +526,11 @@ public class ImprovedPdfBookmarkService {
 
         @Override
         public String doOCR(BufferedImage image, String promptOverride) throws Exception {
-            ByteArrayOutputStream baos = new ByteArrayOutputStream();
-            ImageIO.write(image, "jpg", baos);
-            String base64Image = Base64.getEncoder().encodeToString(baos.toByteArray());
+            return doOCR(Collections.singletonList(image), promptOverride);
+        }
 
+        @Override
+        public String doOCR(List<BufferedImage> images, String promptOverride) throws Exception {
             Map<String, Object> payload = new HashMap<>();
             payload.put("model", model);
             payload.put("max_tokens", 4096);
@@ -546,19 +556,38 @@ public class ImprovedPdfBookmarkService {
 
             List<Map<String, Object>> contentList = new ArrayList<>();
 
+            // 1. 先添加图片 (Images First)
+            for (BufferedImage image : images) {
+                ByteArrayOutputStream baos = new ByteArrayOutputStream();
+                // 使用 JPEG 压缩，质量 0.8，平衡体积和画质
+                javax.imageio.ImageWriter writer = ImageIO.getImageWritersByFormatName("jpg").next();
+                javax.imageio.ImageWriteParam param = writer.getDefaultWriteParam();
+                param.setCompressionMode(javax.imageio.ImageWriteParam.MODE_EXPLICIT);
+                param.setCompressionQuality(0.8f);
+                
+                try (javax.imageio.stream.ImageOutputStream ios = ImageIO.createImageOutputStream(baos)) {
+                    writer.setOutput(ios);
+                    writer.write(null, new javax.imageio.IIOImage(image, null, null), param);
+                }
+                writer.dispose();
+                
+                String base64Image = Base64.getEncoder().encodeToString(baos.toByteArray());
+
+                Map<String, Object> imageContent = new HashMap<>();
+                imageContent.put("type", "image_url");
+                Map<String, String> imageUrl = new HashMap<>();
+                imageUrl.put("url", "data:image/jpeg;base64," + base64Image);
+                imageContent.put("image_url", imageUrl);
+                contentList.add(imageContent);
+            }
+
+            // 2. 后添加文本 Prompt (Text Last)
             Map<String, Object> textContent = new HashMap<>();
             textContent.put("type", "text");
             // 使用 Override 的 Prompt，如果没有则使用默认配置的 Prompt，如果还没配置则使用兜底
             String finalPrompt = (promptOverride != null && !promptOverride.isEmpty()) ? promptOverride : defaultPrompt;
             textContent.put("text", finalPrompt != null && !finalPrompt.isEmpty() ? finalPrompt : "OCR this image. Output only the text content.");
             contentList.add(textContent);
-
-            Map<String, Object> imageContent = new HashMap<>();
-            imageContent.put("type", "image_url");
-            Map<String, String> imageUrl = new HashMap<>();
-            imageUrl.put("url", "data:image/jpeg;base64," + base64Image);
-            imageContent.put("image_url", imageUrl);
-            contentList.add(imageContent);
 
             userMessage.put("content", contentList);
             payload.put("messages", Collections.singletonList(userMessage));
@@ -567,45 +596,28 @@ public class ImprovedPdfBookmarkService {
             headers.setBearerAuth(apiKey);
             headers.setContentType(MediaType.APPLICATION_JSON);
 
-            // DEBUG: Print Request Payload (without image data to save space)
-            try {
-                Map<String, Object> debugPayload = new HashMap<>(payload);
-                List<Map<String, Object>> debugMessages = (List<Map<String, Object>>) debugPayload.get("messages");
-                if (debugMessages != null && !debugMessages.isEmpty()) {
-                    List<Map<String, Object>> debugContent = (List<Map<String, Object>>) debugMessages.get(0).get("content");
-                    if (debugContent != null) {
-                        // Create a copy to modify
-                        List<Map<String, Object>> safeContent = new ArrayList<>();
-                        for (Map<String, Object> item : debugContent) {
-                            if ("image_url".equals(item.get("type"))) {
-                                Map<String, Object> safeItem = new HashMap<>(item);
-                                safeItem.put("image_url", Collections.singletonMap("url", "data:image/jpeg;base64,...(omitted)..."));
-                                safeContent.add(safeItem);
-                            } else {
-                                safeContent.add(item);
-                            }
-                        }
-                        Map<String, Object> safeMessage = new HashMap<>(debugMessages.get(0));
-                        safeMessage.put("content", safeContent);
-                        debugPayload.put("messages", Collections.singletonList(safeMessage));
-                    }
-                }
-                System.out.println("DEBUG: API Request Payload: " + new ObjectMapper().writeValueAsString(debugPayload));
-            } catch (Exception e) {
-                System.err.println("DEBUG: Failed to print payload: " + e.getMessage());
-            }
-
             HttpEntity<Map<String, Object>> request = new HttpEntity<>(payload, headers);
 
-            ResponseEntity<Map> response = restTemplate.postForEntity(baseUrl + "/chat/completions", request, Map.class);
+            try {
+                ResponseEntity<Map> response = restTemplate.postForEntity(baseUrl + "/chat/completions", request, Map.class);
 
-            if (response.getBody() != null && response.getBody().containsKey("choices")) {
-                List choices = (List) response.getBody().get("choices");
-                if (!choices.isEmpty()) {
-                    Map choice = (Map) choices.get(0);
-                    Map message = (Map) choice.get("message");
-                    return (String) message.get("content");
+                if (response.getBody() != null) {
+                    if (response.getBody().containsKey("choices")) {
+                        List choices = (List) response.getBody().get("choices");
+                        if (!choices.isEmpty()) {
+                            Map choice = (Map) choices.get(0);
+                            Map message = (Map) choice.get("message");
+                            return (String) message.get("content");
+                        }
+                    } else if (response.getBody().containsKey("error")) {
+                        System.err.println("API Error Response: " + response.getBody());
+                    } else {
+                        System.err.println("Unknown API Response format: " + response.getBody());
+                    }
                 }
+            } catch (Exception e) {
+                System.err.println("API Request Failed: " + e.getMessage());
+                throw e;
             }
             return "";
         }
@@ -613,7 +625,7 @@ public class ImprovedPdfBookmarkService {
 
     /* ======================= 策略D：基于 OCR 的扫描件提取 ======================= */
 
-    static class StrategyOcr {
+    class StrategyOcr {
         private final OcrEngine ocrEngine;
 
         public StrategyOcr() {
@@ -664,18 +676,9 @@ public class ImprovedPdfBookmarkService {
                             System.out.println(">>> Found TOC Start at Page " + i);
                             tocStartPage = i;
                             
-                            // 阶段二：高精度提取 (300 DPI) - 这里才真正调用配置的 OCR 引擎 (可能是 API)
-                            BufferedImage highResImage = renderer.renderImageWithDPI(i, 300);
-                            String highResText = ocrEngine.doOCR(highResImage);
-                            System.out.println("DEBUG: High Res OCR Result for Page " + i + ":\n" + highResText);
-                            
-                            // 尝试解析 JSON (如果使用 LLM)
-                            List<StrategyPdfBox.RawToc> jsonRaws = tryParseJson(highResText);
-                            if (!jsonRaws.isEmpty()) {
-                                raws.addAll(jsonRaws);
-                            } else {
-                                tocLines.addAll(Arrays.asList(highResText.split("\\r?\\n")));
-                            }
+                            // 收集所有目录页图片
+                            List<BufferedImage> tocImages = new ArrayList<>();
+                            tocImages.add(renderer.renderImageWithDPI(i, 300));
                             
                             // 尝试读取后续页
                             for (int j = i + 1; j < maxScan; j++) {
@@ -686,20 +689,113 @@ public class ImprovedPdfBookmarkService {
                                 // 续页判断也需要稍微严格一点，或者保持宽松但依赖后续清洗
                                 if (countTocLikeLines(nextTextLow) > 3) {
                                     System.out.println(">>> Found TOC Continuation at Page " + j);
-                                    BufferedImage nextImageHigh = renderer.renderImageWithDPI(j, 300);
-                                    String nextTextHigh = ocrEngine.doOCR(nextImageHigh); // 调用 API
-                                    System.out.println("DEBUG: High Res OCR Result for Page " + j + ":\n" + nextTextHigh);
-                                    
-                                    List<StrategyPdfBox.RawToc> nextJsonRaws = tryParseJson(nextTextHigh);
-                                    if (!nextJsonRaws.isEmpty()) {
-                                        raws.addAll(nextJsonRaws);
-                                    } else {
-                                        tocLines.addAll(Arrays.asList(nextTextHigh.split("\\r?\\n")));
-                                    }
+                                    tocImages.add(renderer.renderImageWithDPI(j, 300));
                                 } else {
                                     break;
                                 }
                             }
+                            
+                            // 批量发送识别 (分批处理，每批3张)
+                            System.out.println(">>> Batch OCR for " + tocImages.size() + " pages (Batch Size: 3)...");
+                            
+                            List<StrategyPdfBox.RawToc> allBatchRaws = new ArrayList<>();
+                            StringBuilder allTextFallback = new StringBuilder();
+                            
+                            int batchSize = 3;
+                            for (int k = 0; k < tocImages.size(); k += batchSize) {
+                                int end = Math.min(k + batchSize, tocImages.size());
+                                List<BufferedImage> batch = tocImages.subList(k, end);
+                                System.out.println(">>> Processing Batch " + (k/batchSize + 1) + " (Pages " + k + " to " + (end-1) + ")...");
+                                
+                                int maxRetries = 3;
+                                int retryCount = 0;
+                                String currentPrompt = null;
+                                
+                                while (retryCount <= maxRetries) {
+                                    try {
+                                        String batchResult = ocrEngine.doOCR(batch, currentPrompt);
+                                        System.out.println("DEBUG: Batch " + (k/batchSize + 1) + " Try " + (retryCount+1) + " Result:\n" + batchResult);
+                                        
+                                        List<StrategyPdfBox.RawToc> batchRaws = tryParseJson(batchResult);
+                                        
+                                        // 尝试修复截断的 JSON
+                                        if (batchRaws.isEmpty() && batchResult.contains("[")) {
+                                            batchRaws = tryParseJsonLenient(batchResult);
+                                        }
+                                        
+                                        if (!batchRaws.isEmpty()) {
+                                            allBatchRaws.addAll(batchRaws);
+                                        } else {
+                                            if (retryCount == maxRetries) {
+                                                allTextFallback.append(batchResult).append("\n");
+                                            }
+                                        }
+                                        
+                                        // 检查是否截断
+                                        String trimmed = batchResult.trim();
+                                        if (trimmed.endsWith("```")) trimmed = trimmed.substring(0, trimmed.lastIndexOf("```")).trim();
+                                        boolean isTruncated = !trimmed.endsWith("]");
+                                        
+                                        if (isTruncated && retryCount < maxRetries) {
+                                            String lastTitle = null;
+                                            if (!batchRaws.isEmpty()) {
+                                                lastTitle = batchRaws.get(batchRaws.size() - 1).title;
+                                            } else {
+                                                lastTitle = extractLastTitleFromText(batchResult);
+                                            }
+                                            
+                                            if (lastTitle != null) {
+                                                System.out.println(">>> Truncation detected. Continuing after: " + lastTitle);
+                                                
+                                                // 提取原始 Prompt 中的格式要求部分
+                                                String formatInstruction = (ocrPrompt != null && !ocrPrompt.isEmpty()) ? ocrPrompt : "Output as a JSON array with 'title', 'page', and 'level' fields.";
+                                                
+                                                // 构建更明确的接续 Prompt
+                                                currentPrompt = "The previous output was truncated. We need to continue extracting the Table of Contents.\n" +
+                                                                "**TASK**: Start listing items IMMEDIATELY AFTER the chapter: \"" + lastTitle + "\".\n" +
+                                                                "**CONSTRAINT**: \n" +
+                                                                "1. Do NOT repeat \"" + lastTitle + "\".\n" +
+                                                                "2. Do NOT list any chapters that appear before \"" + lastTitle + "\".\n" +
+                                                                "3. Continue until the end of the provided images.\n\n" +
+                                                                "**FORMATTING RULES** (Strictly follow these rules):\n" + 
+                                                                formatInstruction;
+                                                
+                                                System.out.println("DEBUG: Retry Prompt Length: " + currentPrompt.length());
+                                                
+                                                retryCount++;
+                                                continue;
+                                            }
+                                        }
+                                        break; // 成功或无法继续
+                                        
+                                    } catch (Exception e) {
+                                        System.err.println("Batch OCR Failed: " + e.getMessage());
+                                        break;
+                                    }
+                                }
+                                
+                                // 简单的延时
+                                if (end < tocImages.size()) Thread.sleep(500);
+                            }
+                            
+                            if (!allBatchRaws.isEmpty()) {
+                                raws.addAll(allBatchRaws);
+                                
+                                // [再次执行] 全局层级修正 (确保跨 Batch 的上下文生效)
+                                boolean hasPart = raws.stream().anyMatch(r -> r.title.matches("^第[一二三四五六七八九十百]+[部编].*"));
+                                if (hasPart) {
+                                    for (StrategyPdfBox.RawToc r : raws) {
+                                        if (r.title.matches("^第[一二三四五六七八九十百]+[章].*")) {
+                                            r.level = 2;
+                                        } else if (r.title.matches("^第[一二三四五六七八九十百]+[节].*") || r.title.matches("^\\d+\\.\\d+.*")) {
+                                            r.level = 3;
+                                        }
+                                    }
+                                }
+                            } else {
+                                tocLines.addAll(Arrays.asList(allTextFallback.toString().split("\\r?\\n")));
+                            }
+                            
                             break;
                         }
                     } catch (Exception e) {
@@ -811,7 +907,7 @@ public class ImprovedPdfBookmarkService {
                         TocItem item = new TocItem();
                         item.title = r.title;
                         item.page = physicalPage;
-                        item.level = 1;
+                        item.level = r.level; // 使用解析出的 level
                         items.add(item);
                     }
                 }
@@ -891,87 +987,204 @@ public class ImprovedPdfBookmarkService {
             PDFRenderer renderer = new PDFRenderer(doc);
             int totalPages = doc.getNumberOfPages();
             
-            // 过滤出适合作为锚点的章节 (有页码且标题长度足够)
+            // 过滤出适合作为锚点的章节 (Level 1, 有页码且标题长度足够)
+            // 用户反馈：必须限制 Level 1，否则次章可能选到第一章的第一节，导致基准偏移计算错误
             List<StrategyPdfBox.RawToc> anchors = raws.stream()
-                .filter(r -> r.logicalPage > 0 && r.title != null && r.title.length() >= 2)
+                .filter(r -> r.level == 1 && r.logicalPage > 0 && r.title != null && r.title.length() >= 2)
                 .collect(Collectors.toList());
+
+            if (anchors.isEmpty()) {
+                // 如果没有 Level 1，尝试放宽到 Level 2 (针对只有 Level 2 的特殊书籍)
+                anchors = raws.stream()
+                    .filter(r -> r.logicalPage > 0 && r.title != null && r.title.length() >= 2)
+                    .collect(Collectors.toList());
+            }
 
             if (anchors.isEmpty()) return;
 
             // === 阶段一：快速预检 (Sampling) ===
-            // 选取样本：首、中、尾
-            List<StrategyPdfBox.RawToc> samples = new ArrayList<>();
-            if (!anchors.isEmpty()) samples.add(anchors.get(0));
-            if (anchors.size() > 10) samples.add(anchors.get(anchors.size() / 2));
-            if (anchors.size() > 1) samples.add(anchors.get(anchors.size() - 1));
-
-            Set<Integer> detectedOffsets = new HashSet<>();
-            int validSampleCount = 0;
-
-            System.out.println("DEBUG: Starting Offset Sampling with " + samples.size() + " samples...");
-
-            for (StrategyPdfBox.RawToc sample : samples) {
-                // 搜索范围 +/- 10，确保能找到
-                int offset = findOffsetForTitle(renderer, ocrEngine, sample.title, sample.logicalPage, 0, 10, totalPages);
-                if (offset != -999) {
-                    detectedOffsets.add(offset);
-                    validSampleCount++;
-                    System.out.println("DEBUG: Sample [" + sample.title + "] -> Offset " + offset);
-                }
-            }
-
-            // === 阶段二：决策 ===
-            // 如果找到了有效样本，且所有样本的偏移量都一致
-            if (validSampleCount > 0 && detectedOffsets.size() == 1) {
-                int globalOffset = detectedOffsets.iterator().next();
-                System.out.println("DEBUG: Global Offset Detected: " + globalOffset + ". Applying to all chapters.");
-                
-                // 直接应用全局偏移量
-                for (StrategyPdfBox.RawToc item : raws) {
-                    if (item.logicalPage > 0) {
-                        item.physicalPage = item.logicalPage + globalOffset;
-                    }
-                }
-                return; // 结束，节省大量 API 调用
-            }
-
-            // === 阶段三：回退到逐章校准 (Fallback) ===
-            System.out.println("DEBUG: Offsets are inconsistent or not found. Falling back to chapter-by-chapter alignment.");
+            // 策略：采样首、次、中、尾。
+            // 用次章（通常是正文开始）的偏移去验证中章和尾章。
+            // 如果一致，说明正文偏移统一。
             
-            int currentOffset = 0; 
-            // 尝试使用第一个样本的结果作为初始值
-            if (!detectedOffsets.isEmpty()) {
-                currentOffset = detectedOffsets.iterator().next();
+            List<StrategyPdfBox.RawToc> samples = new ArrayList<>();
+            // 1. 首章
+            if (!anchors.isEmpty()) samples.add(anchors.get(0));
+            // 2. 次章 (如果存在)
+            if (anchors.size() > 1) samples.add(anchors.get(1));
+            // 3. 中章
+            if (anchors.size() > 10) samples.add(anchors.get(anchors.size() / 2));
+            // 4. 尾章 (改为倒数第二章，避开可能的附录/索引/后记，通常正文结束于倒数第二章)
+            if (anchors.size() > 2) {
+                int lastIndex = anchors.size() - 1;
+                if (anchors.size() > 3) {
+                    lastIndex = anchors.size() - 2;
+                }
+                samples.add(anchors.get(lastIndex));
             }
 
-            int lastLogicalPage = -1;
+            // 至少要有次章才能执行此策略 (即至少2个元素)
+            if (anchors.size() > 1) {
+                StrategyPdfBox.RawToc second = anchors.get(1);
+                System.out.println("[Align] Sampling Strategy: Using 2nd chapter [" + second.title + "] as baseline...");
+                
+                // 1. 计算次章偏移 (范围大，20，确保能跨越前言或找到正文)
+                // 关键修正：对于基准搜索，强制只搜索正向偏移 (Positive Only)。
+                // 原因：物理页码 = 逻辑页码 + 前言长度。前言长度 >= 0。
+                // 如果允许负向搜索，可能会匹配到前言中的“下章预告”或目录页，导致偏移量为负，造成全书错误。
+                int baselineOffset = findOffsetForTitle(renderer, ocrEngine, second.title, second.logicalPage, 0, 20, totalPages, true);
+                
+                if (baselineOffset != -999) {
+                     System.out.println("[Align]   > Baseline Offset (from 2nd chapter): " + baselineOffset + ". Verifying Middle/Last...");
+                     boolean consistent = true;
+                     
+                     // 2. 验证中章和尾章 (从 samples index 2 开始)
+                     // 注意：samples列表里，index 0是首章，index 1是次章(baseline)
+                     for (int i = 2; i < samples.size(); i++) {
+                         StrategyPdfBox.RawToc s = samples.get(i);
+                         // 避免重复验证次章自己
+                         if (s == second) continue;
+                         
+                         int verifyOffset = findOffsetForTitle(renderer, ocrEngine, s.title, s.logicalPage, baselineOffset, 2, totalPages);
+                         if (verifyOffset != baselineOffset) {
+                             System.out.println("[Align]   > Mismatch at [" + s.title + "]: Expected " + baselineOffset + ", Got " + verifyOffset);
+                             consistent = false;
+                             break;
+                         }
+                     }
+                     
+                     if (consistent) {
+                         System.out.println("[Align]   > Body samples consistent. Checking First Chapter...");
+                         
+                         // 3. 单独检查首章 (First Chapter)
+                         // 即使首章偏移不同，只要正文一致，我们也可以分别处理，从而避免回退到慢速模式
+                         StrategyPdfBox.RawToc first = anchors.get(0);
+                         
+                         // 扩大搜索范围到 15，以便能覆盖 Preface 的不同偏移 (如 Escape from Freedom)，
+                         // 同时利用 findOffsetForTitle 的搜索顺序 (优先 Baseline) 避免误匹配到 TOC (Offset 0)
+                         int firstOffset = findOffsetForTitle(renderer, ocrEngine, first.title, first.logicalPage, baselineOffset, 15, totalPages);
+                         
+                         // 验证 firstOffset 是否合理：首章物理页必须 <= 次章物理页
+                         // (防止前言被错误匹配到正文里的 running header)
+                         int secondPhysical = second.logicalPage + baselineOffset;
+                         if (firstOffset != -999) {
+                             int firstPhysical = first.logicalPage + firstOffset;
+                             if (firstPhysical > secondPhysical) {
+                                 System.out.println("[Align]   > First chapter found at " + firstPhysical + " but > 2nd chapter (" + secondPhysical + "). Rejecting.");
+                                 firstOffset = -999;
+                             } else {
+                                 System.out.println("[Align]   > First Chapter verified at Offset: " + firstOffset);
+                             }
+                         }
+                         
+                         if (firstOffset == -999) {
+                             // 如果首章用 baselineOffset 没找到，尝试从 0 开始搜 (处理前言偏移不同的情况)
+                             System.out.println("[Align]   > First chapter mismatch. Searching independently...");
+                             
+                             // 限制搜索范围：首章物理页不能超过次章
+                             int maxOffset = Math.max(0, secondPhysical - first.logicalPage);
+                             int searchRange = Math.min(30, maxOffset);
+                             
+                             System.out.println("[Align]   > Constraining search range to " + searchRange + " (Max Phys: " + secondPhysical + ")");
+                             
+                             firstOffset = findOffsetForTitle(renderer, ocrEngine, first.title, first.logicalPage, 0, searchRange, totalPages);
+                         }
+                         
+                         int finalFirstOffset = (firstOffset != -999) ? firstOffset : baselineOffset;
+                         
+                         System.out.println("[Align]   > SUCCESS: Applying offsets. Body: " + baselineOffset + ", First: " + finalFirstOffset);
+                         
+                         for (int i = 0; i < raws.size(); i++) {
+                             StrategyPdfBox.RawToc item = raws.get(i);
+                             if (item.logicalPage <= 0) continue;
+                             
+                             // 简单的启发式逻辑：
+                             // 如果是第一个条目，使用 finalFirstOffset
+                             // 其他条目使用 baselineOffset
+                             // (这能解决大部分前言+正文模式的书籍)
+                             if (i == 0) {
+                                 item.physicalPage = item.logicalPage + finalFirstOffset;
+                             } else {
+                                 item.physicalPage = item.logicalPage + baselineOffset;
+                             }
+                         }
+                         return; // 成功结束
+                     }
+                }
+            }
+            
+            System.out.println("[Align] Sampling failed or inconsistent. Fallback to Smart Alignment (Major Chapter Check)...");
 
+            // 策略优化：动态偏移 (Dynamic Offset)
+            // 不再强制使用全局统一的偏移量，而是根据检测到的锚点进行分段应用。
+            // 这能解决偏移量随页码线性漂移的问题 (如 3, 2, 1, 0, -1...)。
+
+            TreeMap<Integer, Integer> knownOffsets = new TreeMap<>();
+            int currentOffset = 0; 
+            int lastLogicalPage = -1;
+            int lastPhysicalPage = -1;
+            
+            // 第一遍扫描：收集所有确定的偏移量
             for (int i = 0; i < raws.size(); i++) {
                 StrategyPdfBox.RawToc item = raws.get(i);
                 if (item.logicalPage <= 0) continue;
 
-                // 检测页码倒退或重复 (通常意味着进入了新的编码区域，如前言->正文)
-                // 此时偏移量可能会发生较大变化，需要扩大搜索范围
-                boolean isPageReset = (lastLogicalPage != -1 && item.logicalPage <= lastLogicalPage);
-                int searchRange = isPageReset ? 10 : 2;
+                boolean isFirstItem = (lastLogicalPage == -1);
+                boolean isPageReset = (lastLogicalPage != -1 && item.logicalPage < lastLogicalPage);
+                boolean isMajorChapter = item.title != null && item.title.matches("^(第[一二三四五六七八九十\\d]+[章部篇]|Chapter\\s*\\d+).*");
+                boolean isSamePage = (item.logicalPage == lastLogicalPage);
+                boolean shouldSearch = (isFirstItem || isPageReset || isMajorChapter) && !isSamePage;
 
-                // 使用当前偏移量进行预测
-                int predictedPhys = item.logicalPage + currentOffset;
-                
-                // 在预测位置附近搜索
-                int confirmedOffset = findOffsetForTitle(renderer, ocrEngine, item.title, item.logicalPage, currentOffset, searchRange, totalPages);
-                
-                if (confirmedOffset != -999) {
-                    item.physicalPage = item.logicalPage + confirmedOffset;
-                    currentOffset = confirmedOffset; // 更新偏移量
-                    System.out.println("DEBUG: Aligned [" + item.title + "] -> Phys " + item.physicalPage + " (Offset " + currentOffset + ")");
-                } else {
-                    item.physicalPage = predictedPhys;
-                    System.out.println("DEBUG: Not Found [" + item.title + "], using prediction -> Phys " + item.physicalPage);
+                if (shouldSearch) {
+                    if (item.title != null && item.title.length() >= 2) {
+                        int searchBaseOffset = currentOffset;
+                        int searchRange = 5; 
+                        if (isFirstItem || isPageReset) {
+                            searchRange = 30;
+                            if (isPageReset && lastPhysicalPage != -1) {
+                                 int minPhysical = lastPhysicalPage + 1;
+                                 int minOffset = minPhysical - item.logicalPage;
+                                 if (minOffset > currentOffset) searchBaseOffset = minOffset;
+                            }
+                        }
+                        
+                        int foundOffset = findOffsetForTitle(renderer, ocrEngine, item.title, item.logicalPage, searchBaseOffset, searchRange, totalPages);
+                        
+                        if (foundOffset != -999) {
+                            currentOffset = foundOffset;
+                            knownOffsets.put(item.logicalPage, foundOffset);
+                            System.out.println("[Align]   > Found Offset " + foundOffset + " at Logical Page " + item.logicalPage + " [" + item.title + "]");
+                        }
+                    }
                 }
-
                 lastLogicalPage = item.logicalPage;
+                lastPhysicalPage = item.logicalPage + currentOffset; // 估算
             }
+
+            if (knownOffsets.isEmpty()) {
+                System.out.println("[Align] No valid offsets found. Defaulting to 0.");
+                knownOffsets.put(0, 0);
+            }
+
+            // 第二遍扫描：应用分段偏移量
+            // 使用 floorEntry 查找最近的前一个已知偏移量
+            
+            for (StrategyPdfBox.RawToc item : raws) {
+                if (item.logicalPage > 0) {
+                    Map.Entry<Integer, Integer> entry = knownOffsets.floorEntry(item.logicalPage);
+                    int offsetToUse;
+                    if (entry != null) {
+                        offsetToUse = entry.getValue();
+                    } else {
+                        // 如果当前页码小于第一个已知点，使用第一个已知点的偏移
+                        offsetToUse = knownOffsets.firstEntry().getValue();
+                    }
+                    item.physicalPage = item.logicalPage + offsetToUse;
+                }
+            }
+
+            return;
+
         }
 
         /**
@@ -979,12 +1192,21 @@ public class ImprovedPdfBookmarkService {
          * searchRange: 搜索半径 (例如 2 表示搜索 baseOffset-2 到 baseOffset+2)
          */
         private int findOffsetForTitle(PDFRenderer renderer, OcrEngine ocrEngine, String title, int logicalPage, int baseOffset, int searchRange, int totalPages) {
-            // 搜索顺序：先查 baseOffset，然后 +/- 1, +/- 2 ...
-            int[] searchOrder = new int[searchRange * 2 + 1];
-            searchOrder[0] = 0;
+            return findOffsetForTitle(renderer, ocrEngine, title, logicalPage, baseOffset, searchRange, totalPages, false);
+        }
+
+        private int findOffsetForTitle(PDFRenderer renderer, OcrEngine ocrEngine, String title, int logicalPage, int baseOffset, int searchRange, int totalPages, boolean positiveOnly) {
+            // 优化搜索顺序：优先搜索正向偏移 (物理页 >= 逻辑页是绝大多数情况)
+            // 顺序：0, 1, 2... range, -1, -2... -range
+            List<Integer> searchOrder = new ArrayList<>();
+            searchOrder.add(0);
             for (int i = 1; i <= searchRange; i++) {
-                searchOrder[2 * i - 1] = -i;
-                searchOrder[2 * i] = i;
+                searchOrder.add(i);
+            }
+            if (!positiveOnly) {
+                for (int i = 1; i <= searchRange; i++) {
+                    searchOrder.add(-i);
+                }
             }
 
             for (int k : searchOrder) {
@@ -999,10 +1221,17 @@ public class ImprovedPdfBookmarkService {
                     int h = fullImage.getHeight();
                     int w = fullImage.getWidth();
                     if (h < 10 || w < 10) continue;
-                    BufferedImage topImage = fullImage.getSubimage(0, 0, w, h / 3);
+                    BufferedImage topImage = fullImage.getSubimage(0, 0, w, h / 2);
 
                     // VQA Prompt
-                    String prompt = "请判断图片上半部分是否包含章节标题：“" + title + "”。请忽略页眉页脚，仅关注正文标题。如果包含，请回答“是”，否则回答“否”。只回答一个字。";
+                    // 强化 Prompt：明确排除目录页，防止 Offset 被锁定在目录页
+                    String prompt = "请仔细观察图片，判断这是否是章节“" + title + "”的【起始页】。\n" +
+                     "判断标准：\n" +
+                     "1. 页面上必须包含标题“" + title + "”。\n" +
+                     "2. 该标题必须是【大标题】（字号明显大于正文，通常居中或加粗）。\n" +
+                     "3. 严禁匹配【页眉】！如果标题仅出现在页面顶部的页眉区域（字体较小，旁边可能有页码），请回答“否”。\n" +
+                     "4. 严禁匹配【目录】！如果页面包含多个章节标题和页码，请回答“否”。\n" +
+                     "请只回答“是”或“否”。";
                     String response = ocrEngine.doOCR(topImage, prompt).trim();
                     
                     // System.out.println("DEBUG: Check Page " + guessPhys + " for '" + title + "' -> " + response);
@@ -1061,7 +1290,7 @@ public class ImprovedPdfBookmarkService {
                         if (map.containsKey("title")) {
                             String title = String.valueOf(map.get("title"));
                             // 强力清洗标题：去除末尾的页码后缀 (如 "......001")
-                            title = title.replaceAll("[…\\._—\\s]+\\d+$", "").trim();
+                            title = title.replaceAll("[…\\._—]+\\d+$", "").trim();
                             
                             int page = -1;
                             if (map.containsKey("page")) {
@@ -1077,16 +1306,127 @@ public class ImprovedPdfBookmarkService {
                                     }
                                 }
                             }
-                            // 即使没有页码也添加，后续会回填
-                            result.add(new StrategyPdfBox.RawToc(title, page));
+                            
+                            StrategyPdfBox.RawToc raw = new StrategyPdfBox.RawToc(title, page);
+                            
+                            // 解析 Level
+                            int level = 1;
+                            if (map.containsKey("level")) {
+                                Object levelObj = map.get("level");
+                                if (levelObj != null) {
+                                    try {
+                                        level = Integer.parseInt(String.valueOf(levelObj).trim());
+                                    } catch (Exception e) {
+                                        // ignore
+                                    }
+                                }
+                            }
+                            
+                            // 使用正则进行层级校验 (Regex Verification)
+                            // 策略：如果正则能明确判断出层级，优先使用正则结果（因为 AI 可能对缩进判断不准，但对数字编号判断很准）
+                            // 如果正则判断不出（返回默认值），则信任 AI 的结果
+                            int regexLevel = inferLevel(title);
+                            if (regexLevel != 2) { // 2 是 inferLevel 的默认兜底值，如果不是2，说明匹配到了明确的模式
+                                raw.level = regexLevel;
+                            } else {
+                                // 如果正则没匹配到明确模式，就用 AI 的结果 (如果 AI 也没给，默认是 1)
+                                // 但要注意，AI 默认给 1 可能也不对，这里可以结合缩进判断，但我们没有缩进信息
+                                // 所以这里信任 AI，如果 AI 给了 > 1 的值，就用它
+                                raw.level = level;
+                            }
+                            
+                            result.add(raw);
                         }
                     }
+                    
+                    // [新增] 全局层级修正 (Global Level Correction)
+                    // 解决问题：如果书中同时存在 "第一部" (Level 1) 和 "第一章" (Level 1)，
+                    // 应该将 "第一部" 保持 Level 1，将 "第一章" 降级为 Level 2。
+                    boolean hasPart = result.stream().anyMatch(r -> r.title.matches("^第[一二三四五六七八九十百]+[部编].*"));
+                    if (hasPart) {
+                        for (StrategyPdfBox.RawToc r : result) {
+                            if (r.title.matches("^第[一二三四五六七八九十百]+[章].*")) {
+                                r.level = 2;
+                            }
+                            // 如果章变成了 Level 2，那么节 (原本可能是 Level 2) 应该变成 Level 3
+                            else if (r.title.matches("^第[一二三四五六七八九十百]+[节].*") || r.title.matches("^\\d+\\.\\d+.*")) {
+                                r.level = 3;
+                            }
+                        }
+                    }
+
                     return result;
                 }
             } catch (Exception e) {
                 System.err.println("JSON Parse Error: " + e.getMessage());
             }
             return new ArrayList<>();
+        }
+
+        private List<StrategyPdfBox.RawToc> tryParseJsonLenient(String text) {
+            try {
+                int start = text.indexOf('[');
+                int lastBrace = text.lastIndexOf('}');
+                if (start >= 0 && lastBrace > start) {
+                    // 尝试闭合 JSON 数组
+                    String jsonCandidate = text.substring(start, lastBrace + 1) + "]";
+                    return tryParseJson(jsonCandidate);
+                }
+            } catch (Exception e) {
+                // ignore
+            }
+            return new ArrayList<>();
+        }
+
+        private String extractLastTitleFromText(String text) {
+             Pattern p = Pattern.compile("\"title\"\\s*:\\s*\"(.*?)\"");
+             Matcher m = p.matcher(text);
+             String last = null;
+             while (m.find()) {
+                 last = m.group(1);
+             }
+             return last;
+        }
+
+        /**
+         * 静态层级推断工具 (复用 StrategyExplicitToc 的逻辑)
+         */
+        private int inferLevel(String title) {
+            String t = title.trim();
+
+            // Level 1: 第一部、第一编 (最高层级)
+            if (t.matches("^第[一二三四五六七八九十百]+[部编].*")) {
+                return 1;
+            }
+
+            // Level 1 (修正): 第X章 通常也是 Level 1，除非上面有“编/部”
+            // 但为了通用性，我们把“章”也视为 Level 1，把“节”视为 Level 2
+            // 如果书中有“编”，那么“编”是1，“章”是2。这是一个动态调整的问题。
+            // 这里我们采用一种更通用的映射：
+            // 编/部 -> 1
+            // 章 -> 1 (如果没有编) 或 2 (如果有编) -- 暂时统一为 1，后续可以通过后处理调整
+            if (t.matches("^第[一二三四五六七八九十百]+[章].*")) {
+                return 1;
+            }
+
+            // Level 2: 第一节、1.1、(一)
+            // 修正：X.X (如 1.1) 通常是 Level 2 (如果章是 Level 1)
+            if (t.matches("^第[一二三四五六七八九十百]+[节].*") || t.matches("^\\d+\\.\\d+.*")) {
+                return 2;
+            }
+            
+            // Level 3: X.X.X (如 1.1.1)
+            if (t.matches("^\\d+\\.\\d+\\.\\d+.*")) {
+                return 3;
+            }
+
+            // 其他情况 (如 "一、", "(一)")
+            if (t.matches("^[一二三四五六七八九十百]+[、\\s].*")) return 2;
+            if (t.matches("^[(（][一二三四五六七八九十百]+[)）].*")) return 3;
+
+            // 兜底逻辑：如果没有明显前缀，默认为 2 (表示普通章节)
+            // 注意：这里返回 2 是为了配合上面的校验逻辑，表示“不确定”
+            return 2;
         }
     }
 
