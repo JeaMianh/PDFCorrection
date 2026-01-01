@@ -1,7 +1,7 @@
 package com.example.pdfcorrection.controller;
 
 import com.example.pdfcorrection.service.ImprovedPdfBookmarkService;
-import com.example.pdfcorrection.service.ImprovedPdfBookmarkService.TocItem;
+import com.example.pdfcorrection.model.TocItem;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -324,9 +324,9 @@ public class ImprovedPdfBookmarkController {
     private List<Map<String, Object>> formatTocItems(List<TocItem> tocItems, boolean includeScore) {
         return tocItems.stream().map(item -> {
             Map<String, Object> map = new HashMap<>();
-            map.put("title", item.title);
-            map.put("page", item.page);
-            map.put("level", item.level);
+            map.put("title", item.getTitle());
+            map.put("page", item.getPage());
+            map.put("level", item.getLevel());
             if (includeScore) {
                 // TocItem类中没有score字段，所以这里忽略
             }

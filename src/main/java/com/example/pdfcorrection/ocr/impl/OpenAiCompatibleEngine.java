@@ -1,0 +1,132 @@
+package com.example.pdfcorrection.ocr.impl;
+
+import com.example.pdfcorrection.ocr.OcrEngine;
+import org.springframework.http.HttpEntity;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.client.RestTemplate;
+
+import javax.imageio.ImageIO;
+import java.awt.image.BufferedImage;
+import java.io.ByteArrayOutputStream;
+import java.util.*;
+
+public class OpenAiCompatibleEngine implements OcrEngine {
+    private final String apiKey;
+    private final String baseUrl;
+    private final String model;
+    private final String defaultPrompt;
+    private final RestTemplate restTemplate;
+
+    public OpenAiCompatibleEngine(String apiKey, String baseUrl, String model, String defaultPrompt, RestTemplate restTemplate) {
+        this.apiKey = apiKey;
+        this.baseUrl = baseUrl;
+        this.model = model;
+        this.defaultPrompt = defaultPrompt;
+        this.restTemplate = restTemplate;
+    }
+
+    @Override
+    public String doOCR(BufferedImage image) throws Exception {
+        return doOCR(image, null);
+    }
+
+    @Override
+    public String doOCR(BufferedImage image, String promptOverride) throws Exception {
+        return doOCR(Collections.singletonList(image), promptOverride);
+    }
+
+    @Override
+    public String doOCR(List<BufferedImage> images, String promptOverride) throws Exception {
+        Map<String, Object> payload = new HashMap<>();
+        payload.put("model", model);
+        payload.put("max_tokens", 4096);
+
+        // 第一步：先创建thinking对应的嵌套Map，存储其内部的键值对
+        Map<String, Object> thinkingMap = new HashMap<>();
+        thinkingMap.put("type", "disable");
+        thinkingMap.put("clear_thinking", true);
+
+        // 第二步：将嵌套Map作为值，放入顶层payload中
+        payload.put("thinking", thinkingMap);
+        
+        
+        // Request JSON format if supported (e.g. gpt-4o, gpt-3.5-turbo-0125)
+        if (model.contains("gpt") || model.contains("json")) {
+            Map<String, String> responseFormat = new HashMap<>();
+            responseFormat.put("type", "json_object");
+            payload.put("response_format", responseFormat);
+        }
+
+        Map<String, Object> userMessage = new HashMap<>();
+        userMessage.put("role", "user");
+
+        List<Map<String, Object>> contentList = new ArrayList<>();
+
+        // 1. 先添加图片 (Images First)
+        for (BufferedImage image : images) {
+            ByteArrayOutputStream baos = new ByteArrayOutputStream();
+            // 使用 JPEG 压缩，质量 0.8，平衡体积和画质
+            javax.imageio.ImageWriter writer = ImageIO.getImageWritersByFormatName("jpg").next();
+            javax.imageio.ImageWriteParam param = writer.getDefaultWriteParam();
+            param.setCompressionMode(javax.imageio.ImageWriteParam.MODE_EXPLICIT);
+            param.setCompressionQuality(0.8f);
+            
+            try (javax.imageio.stream.ImageOutputStream ios = ImageIO.createImageOutputStream(baos)) {
+                writer.setOutput(ios);
+                writer.write(null, new javax.imageio.IIOImage(image, null, null), param);
+            }
+            writer.dispose();
+            
+            String base64Image = Base64.getEncoder().encodeToString(baos.toByteArray());
+
+            Map<String, Object> imageContent = new HashMap<>();
+            imageContent.put("type", "image_url");
+            Map<String, String> imageUrl = new HashMap<>();
+            imageUrl.put("url", "data:image/jpeg;base64," + base64Image);
+            imageContent.put("image_url", imageUrl);
+            contentList.add(imageContent);
+        }
+
+        // 2. 后添加文本 Prompt (Text Last)
+        Map<String, Object> textContent = new HashMap<>();
+        textContent.put("type", "text");
+        // 使用 Override 的 Prompt，如果没有则使用默认配置的 Prompt，如果还没配置则使用兜底
+        String finalPrompt = (promptOverride != null && !promptOverride.isEmpty()) ? promptOverride : defaultPrompt;
+        textContent.put("text", finalPrompt != null && !finalPrompt.isEmpty() ? finalPrompt : "OCR this image. Output only the text content.");
+        contentList.add(textContent);
+
+        userMessage.put("content", contentList);
+        payload.put("messages", Collections.singletonList(userMessage));
+
+        HttpHeaders headers = new HttpHeaders();
+        headers.setBearerAuth(apiKey);
+        headers.setContentType(MediaType.APPLICATION_JSON);
+
+        HttpEntity<Map<String, Object>> request = new HttpEntity<>(payload, headers);
+
+        try {
+            ResponseEntity<Map> response = restTemplate.postForEntity(baseUrl + "/chat/completions", request, Map.class);
+
+            if (response.getBody() != null) {
+                if (response.getBody().containsKey("choices")) {
+                    List choices = (List) response.getBody().get("choices");
+                    if (!choices.isEmpty()) {
+                        Map choice = (Map) choices.get(0);
+                        Map message = (Map) choice.get("message");
+                        return (String) message.get("content");
+                    }
+                } else if (response.getBody().containsKey("error")) {
+                    System.err.println("API Error Response: " + response.getBody());
+                } else {
+                    System.err.println("Unknown API Response format: " + response.getBody());
+                }
+            }
+        } catch (Exception e) {
+            System.err.println("API Request Failed: " + e.getMessage());
+            throw e;
+        }
+        return "";
+    }
+}
