@@ -142,10 +142,54 @@
     
     <!-- 目录结构预览模态框 -->
     <PdfModal v-model:visible="showTocModal" title="PDF目录结构预览" content-class="toc-modal">
-      <div class="toc-preview">
-        <pre v-if="tocContent">{{ tocContent }}</pre>
-        <div v-else>加载中...</div>
+      <!-- 加载状态 -->
+      <div v-if="isBookmarkProcessing" class="toc-loading-container">
+        <div class="loading-spinner"></div>
+        <div class="loading-text">正在分析目录结构...</div>
       </div>
+
+      <!-- 内容区域 -->
+      <div v-else class="toc-container">
+        <!-- 左侧 PDF 预览 -->
+        <div class="toc-pdf-preview">
+          <div class="pdf-viewer-body">
+            <VuePdfApp 
+              v-if="previewPdfUrl" 
+              :pdf="previewPdfUrl"
+              theme="light"
+              :config="pdfAppConfig"
+              ref="pdfApp"
+              class="clean-pdf-viewer"
+              :page="currentPdfPage"
+              @pages-rendered="() => {}"
+              @page-changed="(page) => currentPdfPage = page"
+              @after-created="handlePdfAppCreated"
+            />
+            <div v-else class="loading-placeholder">加载 PDF 中...</div>
+          </div>
+        </div>
+
+        <!-- 右侧 目录编辑 -->
+        <div class="toc-editor-panel">
+          <PdfTocEditor 
+            v-if="tocData && tocData.length > 0" 
+            v-model="tocData" 
+            @page-focus="handlePageFocus"
+          />
+          <div v-else-if="tocContent === '未获取到目录结构'" class="error-text">{{ tocContent }}</div>
+          <div v-else class="empty-text">暂无目录数据</div>
+        </div>
+      </div>
+      <template #footer>
+        <div class="toc-modal-footer">
+          <div class="footer-info" v-if="tocData.length > 0">
+            共 {{ tocData.length }} 个章节
+          </div>
+          <PdfButton variant="primary" @click="addBookmarksToPdf" :loading="isBookmarkProcessing">
+            确认并生成PDF
+          </PdfButton>
+        </div>
+      </template>
     </PdfModal>
   </div>
 </template>
@@ -156,6 +200,9 @@ import PdfUpload from './components/PdfUpload.vue';
 import PdfButton from './components/PdfButton.vue';
 import PdfProgress from './components/PdfProgress.vue';
 import PdfModal from './components/PdfModal.vue';
+import PdfTocEditor from './components/PdfTocEditor.vue';
+import VuePdfApp from 'vue3-pdf-app';
+import "vue3-pdf-app/dist/icons/main.css";
 
 export default {
   name: 'App',
@@ -163,7 +210,9 @@ export default {
     PdfUpload,
     PdfButton,
     PdfProgress,
-    PdfModal
+    PdfModal,
+    PdfTocEditor,
+    VuePdfApp
   },
   data() {
     return {
@@ -191,7 +240,28 @@ export default {
       totalBatches: 0, // 总批次数
       currentBatch: 0,  // 当前批次数
       tocContent: null,
-      lastProcessedFile: null // 用于缓存目录预览的文件引用
+      tocData: [], // 解析后的目录数据
+      lastProcessedFile: null, // 用于缓存目录预览的文件引用
+      currentPdfPage: 1,
+      pdfAppInstance: null, // 保存 PDF viewer 实例
+      pdfAppConfig: {
+        sidebar: false,
+        toolbar: {
+          toolbarViewerLeft: {
+            findbar: false,
+            previous: true,
+            next: true,
+            pageNumber: true,
+          },
+          toolbarViewerRight: {
+            presentationMode: false,
+            openFile: false,
+            print: false,
+            download: false,
+            viewBookmark: false,
+          }
+        }
+      }
     };
   },
   methods: {
@@ -199,6 +269,7 @@ export default {
       this.errorMessage = '';
       // 文件改变时，清空目录缓存
       this.tocContent = null;
+      this.tocData = [];
       this.lastProcessedFile = null;
     },
 
@@ -463,10 +534,17 @@ export default {
       this.errorMessage = '';
       this.tocContent = null;
       this.showTocModal = true;
+      
+      // 更新预览 URL
+      if (this.previewPdfUrl) {
+        URL.revokeObjectURL(this.previewPdfUrl);
+      }
+      if (this.selectedFile) {
+        this.previewPdfUrl = URL.createObjectURL(this.selectedFile);
+      }
 
       const formData = new FormData();
       formData.append('file', this.selectedFile);
-
       try {
         const response = await axios.post('http://localhost:8080/api/pdf/preview-toc', formData, {
           headers: {
@@ -475,22 +553,37 @@ export default {
         });
 
         if (response.data) {
+          let parsedData = null;
           // 检查返回的数据是否已经是JSON对象
           if (typeof response.data === 'object') {
-            this.tocContent = JSON.stringify(response.data, null, 2);
+            parsedData = response.data;
           } else {
             // 如果是字符串，则尝试解析为JSON
             try {
-              this.tocContent = JSON.stringify(JSON.parse(response.data), null, 2);
+              parsedData = JSON.parse(response.data);
             } catch (parseError) {
               // 如果解析失败，直接显示原始数据
               this.tocContent = response.data;
             }
           }
+
+          if (parsedData) {
+            // 处理后端返回的结构
+            if (parsedData.tableOfContents) {
+              this.tocData = parsedData.tableOfContents;
+            } else if (Array.isArray(parsedData)) {
+              this.tocData = parsedData;
+            } else {
+              this.tocData = [];
+            }
+            this.tocContent = JSON.stringify(parsedData, null, 2);
+          }
+          
           // 缓存当前文件引用
           this.lastProcessedFile = this.selectedFile;
         } else {
           this.tocContent = '未获取到目录结构';
+          this.tocData = [];
         }
       } catch (error) {
         console.error('预览目录结构失败:', error);
@@ -510,6 +603,38 @@ export default {
       }
     },
 
+    handlePdfAppCreated(pdfApp) {
+      console.log('PDF App created:', pdfApp);
+      this.pdfAppInstance = pdfApp;
+    },
+
+    async handlePageFocus(page) {
+      // 尝试跳转到指定页面
+      if (page > 0) {
+        const pageNum = parseInt(page);
+        console.log('尝试跳转到页面:', pageNum);
+        
+        // 1. 更新绑定的 prop (保持状态同步)
+        this.currentPdfPage = pageNum;
+        
+        // 2. 使用实例直接跳转 (最可靠的方式)
+        if (this.pdfAppInstance) {
+          try {
+            console.log('使用 pdfAppInstance 跳转到:', pageNum);
+            this.pdfAppInstance.page = pageNum;
+          } catch (e) {
+            console.error('实例跳转失败:', e);
+          }
+        } else {
+          console.warn('pdfAppInstance 未就绪');
+          // 备选：尝试通过 ref 获取 (如果 after-created 还没触发)
+          if (this.$refs.pdfApp && this.$refs.pdfApp.pdfApp) {
+             this.$refs.pdfApp.pdfApp.page = pageNum;
+          }
+        }
+      }
+    },
+
     // 添加书签到PDF并下载
     async addBookmarksToPdf() {
       if (!this.selectedFile) {
@@ -519,7 +644,14 @@ export default {
 
       this.isBookmarkProcessing = true;
       this.errorMessage = '';
-      this.progressValue = 0;
+      // 使用当前编辑过的 tocData
+      if (this.tocData && this.tocData.length > 0 && this.lastProcessedFile === this.selectedFile) {
+        // 构造后端期望的格式
+        const payload = {
+          tableOfContents: this.tocData
+        };
+        formData.append('tocJson', JSON.stringify(payload));
+      } else this.progressValue = 0;
       
       // 模拟进度条，因为这个接口返回文件流，无法使用SSE
       if (this.progressInterval) clearInterval(this.progressInterval);
@@ -592,6 +724,11 @@ export default {
       this.currentBatch = 0;
       this.tocContent = null;
       this.lastProcessedFile = null;
+      
+      if (this.previewPdfUrl) {
+        URL.revokeObjectURL(this.previewPdfUrl);
+        this.previewPdfUrl = null;
+      }
       
       // 关闭事件源
       if (this.eventSource) {
@@ -874,26 +1011,125 @@ html, body {
 
 /* 目录结构预览模态框 */
 .toc-modal {
-  width: 80vw;
-  height: 80vh;
+  width: 95vw;
+  height: 90vh;
+  display: flex;
+  flex-direction: column;
 }
 
-.toc-preview {
-  padding: 20px;
+.toc-loading-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
   height: 100%;
-  overflow: auto;
+  color: #5f6368;
 }
 
-.toc-preview pre {
-  background: #f8f9fa;
-  padding: 15px;
-  border-radius: 8px;
-  white-space: pre-wrap;
-  word-wrap: break-word;
-  font-family: 'Courier New', monospace;
+.loading-spinner {
+  width: 40px;
+  height: 40px;
+  border: 3px solid #f3f3f3;
+  border-top: 3px solid #1a73e8;
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+  margin-bottom: 16px;
+}
+
+@keyframes spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+.toc-container {
+  display: flex;
+  height: 100%; /* 占满 modal body */
+  overflow: hidden;
+}
+
+.toc-pdf-preview {
+  flex: 1;
+  border-right: 1px solid #e0e0e0;
+  display: flex;
+  flex-direction: column;
+  background: #525659;
+  overflow: hidden; /* 确保 PDF 容器不溢出 */
+}
+
+.pdf-viewer-header {
+  padding: 8px 16px;
+  background: #323639;
+  color: #f1f3f4;
+  font-size: 12px;
+  font-weight: 500;
+  flex-shrink: 0;
+}
+
+.pdf-viewer-body {
+  flex: 1;
+  position: relative;
+  overflow: hidden; /* vue3-pdf-app 会处理自己的滚动 */
+}
+
+.pdf-viewer-body iframe {
+  width: 100%;
+  height: 100%;
+  border: none;
+}
+
+.loading-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: #fff;
+}
+
+.clean-pdf-viewer {
+  height: 100%;
+  width: 100%;
+}
+
+/* 隐藏 vue3-pdf-app 的部分多余样式，使其更像原生 */
+:deep(.toolbar) {
+  background-color: #f5f5f5 !important;
+  border-bottom: 1px solid #e0e0e0 !important;
+}
+
+.toc-editor-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  background: #f5f5f5;
+  min-width: 500px; /* 保证编辑器有足够宽度 */
+  overflow: hidden; /* 禁止自身滚动，由子组件处理 */
+}
+
+.toc-modal-footer {
+  display: flex;
+  justify-content: space-between; /* 两端对齐 */
+  align-items: center;
+  width: 100%; /* 占满宽度 */
+  /* 移除多余的 padding 和 border，因为父组件已经有了 */
+  padding: 0;
+  border: none;
+  background: transparent;
+}
+
+.footer-info {
+  color: #5f6368;
   font-size: 14px;
-  line-height: 1.5;
-  color: #333;
-  margin: 0;
+}
+
+.error-text {
+  padding: 40px;
+  color: #d93025;
+  text-align: center;
+}
+
+.empty-text, .loading-text {
+  padding: 40px;
+  text-align: center;
+  color: #5f6368;
 }
 </style>

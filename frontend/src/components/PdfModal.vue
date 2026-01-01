@@ -101,8 +101,9 @@ export default {
   background: white;
   border-radius: 12px;
   width: 95vw;
+  height: 90vh; /* 固定高度 */
   max-height: 90vh;
-  overflow: auto;
+  overflow: hidden; /* 禁止整体滚动 */
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
   display: flex;
   flex-direction: column;
@@ -114,10 +115,9 @@ export default {
   align-items: center;
   padding: 20px 30px;
   border-bottom: 1px solid #eee;
-  position: sticky;
-  top: 0;
   background: white;
   z-index: 10;
+  flex-shrink: 0; /* 防止被压缩 */
 }
 
 .pdf-modal__header h2 {
@@ -147,9 +147,11 @@ export default {
 }
 
 .pdf-modal__body {
-  padding: 30px;
+  padding: 0; /* 移除 padding，由内部容器控制 */
   flex: 1;
-  overflow: auto;
+  overflow: hidden; /* 禁止 body 滚动，由内部容器控制 */
+  display: flex;
+  flex-direction: column;
 }
 
 .pdf-modal__footer {
@@ -158,10 +160,9 @@ export default {
   display: flex;
   justify-content: flex-end;
   gap: 15px;
-  position: sticky;
-  bottom: 0;
   background: white;
   z-index: 10;
+  flex-shrink: 0; /* 防止被压缩 */
 }
 
 @media (max-width: 768px) {
