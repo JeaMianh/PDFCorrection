@@ -43,7 +43,7 @@ public class OpenAiCompatibleEngine implements OcrEngine {
         payload.put("model", model);
         payload.put("max_tokens", 4096);
 
-        // if (apiModel.equalsIgnoreCase("GLM-4.6V-Flash")) {
+        // if (model.equalsIgnoreCase("GLM-4.6V-Flash")) {
         //     // 第一步：先创建thinking对应的嵌套Map，存储其内部的键值对
         // Map<String, Object> thinkingMap = new HashMap<>();
         // thinkingMap.put("type", "disable");
@@ -52,7 +52,7 @@ public class OpenAiCompatibleEngine implements OcrEngine {
         // // 第二步：将嵌套Map作为值，放入顶层payload中
         // payload.put("thinking", thinkingMap);
         // }
-        
+
         
         
         // Determine final prompt first to decide on response_format

@@ -3,6 +3,7 @@ package com.example.pdfcorrection.strategy.impl;
 import com.example.pdfcorrection.model.RawToc;
 import com.example.pdfcorrection.model.TocItem;
 import com.example.pdfcorrection.ocr.OcrEngine;
+import com.example.pdfcorrection.ocr.impl.TesseractEngine;
 import com.example.pdfcorrection.service.PageAlignmentService;
 import com.example.pdfcorrection.util.TocTextParser;
 import org.apache.pdfbox.pdmodel.PDDocument;
@@ -29,6 +30,9 @@ public class OcrStrategy {
 
     public List<TocItem> extract(MultipartFile file, OcrEngine ocrEngine, String ocrPrompt) throws IOException {
         List<TocItem> items = new ArrayList<>();
+        
+        // Use Tesseract for Discovery Scan (Faster & Cheaper)
+        OcrEngine discoveryEngine = new TesseractEngine();
 
         try (PDDocument doc = PDDocument.load(file.getInputStream())) {
             PDFRenderer renderer = new PDFRenderer(doc);
@@ -44,12 +48,12 @@ public class OcrStrategy {
                     // Phase 1: Quick Scan (150 DPI)
                     BufferedImage image = renderer.renderImageWithDPI(i, 150);
                     // Force plain text prompt for detection
-                    String text = ocrEngine.doOCR(image, "请仅输出图像中的文本内容。");
+                    String text = discoveryEngine.doOCR(image, "请仅输出图像中的文本内容。");
 
                     String cleanText = text.replaceAll("\\s+", "");
                     int tocLikeCount = TocTextParser.countTocLikeLines(text);
 
-                    System.out.println("Discovery Scan Page " + i + ": length=" + text.length() + ", tocLines=" + tocLikeCount + ", hasKeyword=" + (cleanText.contains("目录") || cleanText.toLowerCase().contains("contents")));
+                    System.out.println("Discovery Scan Page " + i + " (TesseractEngine): length=" + text.length() + ", tocLines=" + tocLikeCount + ", hasKeyword=" + (cleanText.contains("目录") || cleanText.toLowerCase().contains("contents")));
 
                     boolean isTocPage = cleanText.contains("目录") || cleanText.toLowerCase().contains("contents");
                     if (!isTocPage) {
@@ -71,7 +75,7 @@ public class OcrStrategy {
                         // Try to read subsequent pages
                         for (int j = i + 1; j < maxScan; j++) {
                             BufferedImage nextImageLow = renderer.renderImageWithDPI(j, 150);
-                            String nextTextLow = ocrEngine.doOCR(nextImageLow, "请仅输出图像中的文本内容。");
+                            String nextTextLow = discoveryEngine.doOCR(nextImageLow, "请仅输出图像中的文本内容。");
 
                             if (TocTextParser.countTocLikeLines(nextTextLow) > 3) {
                                 System.out.println(">>> Found TOC Continuation at Page " + j);
