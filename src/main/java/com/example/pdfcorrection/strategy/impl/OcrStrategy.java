@@ -131,7 +131,8 @@ public class OcrStrategy {
                                     // Check for truncation
                                     String trimmed = batchResult.trim();
                                     if (trimmed.endsWith("```")) trimmed = trimmed.substring(0, trimmed.lastIndexOf("```")).trim();
-                                    boolean isTruncated = !trimmed.endsWith("]");
+                                    // Allow ending with ']' (array) or '}' (wrapped object)
+                                    boolean isTruncated = !trimmed.endsWith("]") && !trimmed.endsWith("}");
 
                                     if (isTruncated && retryCount < maxRetries) {
                                         String lastTitle = null;
