@@ -43,15 +43,15 @@ public class OpenAiCompatibleEngine implements OcrEngine {
         payload.put("model", model);
         payload.put("max_tokens", 4096);
 
-        // if (model.equalsIgnoreCase("GLM-4.6V-Flash")) {
-        //     // 第一步：先创建thinking对应的嵌套Map，存储其内部的键值对
-        // Map<String, Object> thinkingMap = new HashMap<>();
-        // thinkingMap.put("type", "disable");
-        // thinkingMap.put("clear_thinking", true);
+        if (model.toUpperCase().contains("GLM")) {
+            // 第一步：先创建thinking对应的嵌套Map，存储其内部的键值对
+            Map<String, Object> thinkingMap = new HashMap<>();
+            thinkingMap.put("type", "disable");
+            thinkingMap.put("clear_thinking", true);
 
-        // // 第二步：将嵌套Map作为值，放入顶层payload中
-        // payload.put("thinking", thinkingMap);
-        // }
+            // 第二步：将嵌套Map作为值，放入顶层payload中
+            payload.put("thinking", thinkingMap);
+        }
 
         
         
@@ -118,8 +118,17 @@ public class OpenAiCompatibleEngine implements OcrEngine {
         Exception lastException = null;
 
         while (attempt < maxRetries) {
+            long start = System.currentTimeMillis();
             try {
+                // Debug Log: Request
+                if (attempt == 0) {
+                    System.out.println(">>> API Request [" + model + "] to " + baseUrl);
+                    System.out.println("    Prompt: " + (finalPrompt.length() > 100 ? finalPrompt.substring(0, 100) + "..." : finalPrompt));
+                    System.out.println("    Images: " + images.size());
+                }
+
                 ResponseEntity<Map> response = restTemplate.postForEntity(baseUrl + "/chat/completions", request, Map.class);
+                long duration = System.currentTimeMillis() - start;
 
                 if (response.getBody() != null) {
                     if (response.getBody().containsKey("choices")) {
@@ -127,25 +136,27 @@ public class OpenAiCompatibleEngine implements OcrEngine {
                         if (!choices.isEmpty()) {
                             Map choice = (Map) choices.get(0);
                             Map message = (Map) choice.get("message");
-                            return (String) message.get("content");
+                            String content = (String) message.get("content");
+                            
+                            // Debug Log: Success
+                            System.out.println("<<< API Response (Success) in " + duration + "ms. Length: " + (content != null ? content.length() : 0));
+                            
+                            return content;
                         }
                     } else if (response.getBody().containsKey("error")) {
-                        System.err.println("API Error Response: " + response.getBody());
-                        // If it's a rate limit or server error, we might want to retry.
-                        // For now, let's treat it as an exception to trigger retry.
+                        System.err.println("<<< API Error Response in " + duration + "ms: " + response.getBody());
                         throw new RuntimeException("API Error: " + response.getBody());
                     } else {
-                        System.err.println("Unknown API Response format: " + response.getBody());
+                        System.err.println("<<< Unknown API Response format in " + duration + "ms: " + response.getBody());
                     }
                 }
-                // If we got a valid response but no content, break loop and return empty?
-                // Or maybe retry? Let's assume success if we got here without exception.
                 return ""; 
 
             } catch (Exception e) {
+                long duration = System.currentTimeMillis() - start;
                 lastException = e;
                 attempt++;
-                System.err.println("API Request Failed (Attempt " + attempt + "/" + maxRetries + "): " + e.getMessage());
+                System.err.println("<<< API Request Failed (Attempt " + attempt + "/" + maxRetries + ") in " + duration + "ms: " + e.getMessage());
                 
                 if (attempt < maxRetries) {
                     try {

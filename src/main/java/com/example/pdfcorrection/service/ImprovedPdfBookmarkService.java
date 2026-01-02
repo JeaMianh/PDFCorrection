@@ -16,6 +16,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
 import org.springframework.web.multipart.MultipartFile;
 
+import java.io.InputStream;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
@@ -27,8 +28,8 @@ import java.util.List;
 @Service
 public class ImprovedPdfBookmarkService {
 
-    @Value("${pdf.ocr.provider:local}")
-    private String ocrProvider;
+    // @Value("${pdf.ocr.provider:local}")
+    // private String ocrProvider;
 
     @Value("${pdf.ocr.api.api-key:}")
     private String apiKey;
@@ -38,6 +39,15 @@ public class ImprovedPdfBookmarkService {
 
     @Value("${pdf.ocr.api.model:qwen-vl-ocr-2025-11-20}")
     private String apiModel;
+
+    @Value("${pdf.ocr.api.extraction-model:}")
+    private String extractionApiModel;
+
+    @Value("${pdf.ocr.api.extraction-api-key:}")
+    private String extractionApiKey;
+
+    @Value("${pdf.ocr.api.extraction-base-url:}")
+    private String extractionApiBaseUrl;
 
     @Value("${pdf.ocr.prompt:请识别图片中的目录内容。请严格按照图片中的顺序，输出一个扁平的 JSON 数组。每个元素包含 'title' (完整的章节标题，必须包含章节编号，如'1.1 绪论'，或'第一章 标题')、'page' (页码) 和 'level' (层级，整数，1表示一级标题，2表示二级标题，以此类推) 三个字段。\\n**关键要求**：\\n1. **完整性**：绝对不要遗漏章节编号！例如图片显示 '1.1.1 数据结构'，title 必须是 '1.1.1 数据结构'。\\n2. **层级判断** (综合判断)：\\n   - **语义编号** (优先)：'第一部/编' > '第一章' > '第一节'。例如：如果有'第一部'，则'第一部'是Level 1，'第一章'是Level 2。如果没有'部'，则'第一章'是Level 1。\\n   - **缩进**：在编号不明确时，缩进越深 level 越大。\\n   - **字体**：字号大或加粗的通常层级更高。\\n3. **页码**：如果某行没有页码，page 字段留空字符串。\\n不要输出 Markdown 标记，只输出 JSON。}")
     private String ocrPrompt;
@@ -88,7 +98,9 @@ public class ImprovedPdfBookmarkService {
 
     public List<TocItem> extractTocItems(MultipartFile file) throws IOException {
         List<TocItem> items = new ArrayList<>();
-        try (PdfDocument pdf = new PdfDocument(new PdfReader(file.getInputStream()))) {
+        try (InputStream is = file.getInputStream();
+             PdfReader reader = new PdfReader(is);
+             PdfDocument pdf = new PdfDocument(reader)) {
             // 1. Pre-scan: Find potential TOC pages
             List<Integer> tocCandidatePages = tocDiscoveryService.findTocPages(pdf);
 
@@ -118,14 +130,33 @@ public class ImprovedPdfBookmarkService {
         if (items == null || items.isEmpty()) {
             try {
                 OcrEngine engine;
-                if ("aliyun".equalsIgnoreCase(ocrProvider) || "deepseek".equalsIgnoreCase(ocrProvider)) {
-                    System.out.println("Using API OCR Strategy (" + apiModel + ")...");
-                    engine = new OpenAiCompatibleEngine(apiKey, apiBaseUrl, apiModel, ocrPrompt, restTemplate);
+                OcrEngine discoveryEngine;
+                
+                // Check if API is configured (Base URL and Key must be present)
+                if (apiBaseUrl != null && !apiBaseUrl.isEmpty() && apiKey != null && !apiKey.isEmpty()) {
+                    System.out.println("Configuring OCR Engines...");
+                    
+                    // 1. Discovery Engine (Base Model)
+                    System.out.println("  Discovery Engine Model: " + apiModel);
+                    discoveryEngine = new OpenAiCompatibleEngine(apiKey, apiBaseUrl, apiModel, ocrPrompt, restTemplate);
+                    
+                    // 2. Extraction Engine (High Precision)
+                    if (extractionApiModel != null && !extractionApiModel.trim().isEmpty()) {
+                        System.out.println("  Extraction Engine Model: " + extractionApiModel);
+                        String effectiveExtractionKey = (extractionApiKey != null && !extractionApiKey.trim().isEmpty()) ? extractionApiKey : apiKey;
+                        String effectiveExtractionUrl = (extractionApiBaseUrl != null && !extractionApiBaseUrl.trim().isEmpty()) ? extractionApiBaseUrl : apiBaseUrl;
+                        
+                        engine = new OpenAiCompatibleEngine(effectiveExtractionKey, effectiveExtractionUrl, extractionApiModel, ocrPrompt, restTemplate);
+                    } else {
+                        System.out.println("  Extraction Engine Model: " + apiModel + " (Fallback to Discovery Model)");
+                        engine = discoveryEngine;
+                    }
                 } else {
                     System.out.println("Using Local Tesseract OCR Strategy...");
                     engine = new TesseractEngine();
+                    discoveryEngine = engine;
                 }
-                items = ocrStrategy.extract(file, engine, ocrPrompt);
+                items = ocrStrategy.extract(file, engine, discoveryEngine, ocrPrompt);
             } catch (Exception e) {
                 System.err.println("OCR extraction failed: " + e.getMessage());
                 e.printStackTrace();

@@ -56,7 +56,9 @@ public class PageAlignmentService {
                 int assumedLogical = (candidate.getLogicalPage() > 0) ? candidate.getLogicalPage() : 1;
 
                 // Search in a wider range (e.g. 0 to 50)
+                long searchStart = System.currentTimeMillis();
                 int foundOffset = findOffsetForTitle(renderer, ocrEngine, candidate.getTitle(), assumedLogical, 0, 50, totalPages, true);
+                System.out.println("[Align] Blind Search for [" + candidate.getTitle() + "] took " + (System.currentTimeMillis() - searchStart) + "ms");
 
                 if (foundOffset != -999) {
                     System.out.println("[Align]   > Found [" + candidate.getTitle() + "] with offset " + foundOffset + " (assuming logical " + assumedLogical + ")");

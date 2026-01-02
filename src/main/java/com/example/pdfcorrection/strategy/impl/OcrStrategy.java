@@ -8,11 +8,13 @@ import com.example.pdfcorrection.service.PageAlignmentService;
 import com.example.pdfcorrection.util.TocTextParser;
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.rendering.PDFRenderer;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.awt.image.BufferedImage;
 import java.io.IOException;
+import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -22,19 +24,33 @@ import java.util.regex.Pattern;
 @Component
 public class OcrStrategy {
 
+    @Value("${pdf.ocr.discovery-mode:local}")
+    private String discoveryMode;
+
+    @Value("${pdf.ocr.batch-size:3}")
+    private int batchSize;
+
     private final PageAlignmentService pageAlignmentService;
 
     public OcrStrategy(PageAlignmentService pageAlignmentService) {
         this.pageAlignmentService = pageAlignmentService;
     }
 
-    public List<TocItem> extract(MultipartFile file, OcrEngine ocrEngine, String ocrPrompt) throws IOException {
+    public List<TocItem> extract(MultipartFile file, OcrEngine ocrEngine, OcrEngine providedDiscoveryEngine, String ocrPrompt) throws IOException {
         List<TocItem> items = new ArrayList<>();
         
-        // Use Tesseract for Discovery Scan (Faster & Cheaper)
-        OcrEngine discoveryEngine = new TesseractEngine();
+        // Determine Discovery Engine
+        OcrEngine discoveryEngine;
+        if ("api".equalsIgnoreCase(discoveryMode) || "llm".equalsIgnoreCase(discoveryMode)) {
+            discoveryEngine = providedDiscoveryEngine;
+            System.out.println("Using API Engine for Discovery Scan (Mode: " + discoveryMode + ").");
+        } else {
+            discoveryEngine = new TesseractEngine();
+            System.out.println("Using Local Tesseract Engine for Discovery Scan.");
+        }
 
-        try (PDDocument doc = PDDocument.load(file.getInputStream())) {
+        try (InputStream is = file.getInputStream();
+             PDDocument doc = PDDocument.load(is)) {
             PDFRenderer renderer = new PDFRenderer(doc);
             int maxScan = Math.min(20, doc.getNumberOfPages());
 
@@ -43,24 +59,46 @@ public class OcrStrategy {
             List<RawToc> raws = new ArrayList<>();
 
             // 1. Find TOC pages (OCR)
+            long discoveryStart = System.currentTimeMillis();
             for (int i = 0; i < maxScan; i++) { // PDFBox page index starts at 0
                 try {
                     // Phase 1: Quick Scan (150 DPI)
+                    long pageScanStart = System.currentTimeMillis();
                     BufferedImage image = renderer.renderImageWithDPI(i, 150);
-                    // Force plain text prompt for detection
-                    String text = discoveryEngine.doOCR(image, "请仅输出图像中的文本内容。");
-
-                    String cleanText = text.replaceAll("\\s+", "");
-                    int tocLikeCount = TocTextParser.countTocLikeLines(text);
-
-                    System.out.println("Discovery Scan Page " + i + " (TesseractEngine): length=" + text.length() + ", tocLines=" + tocLikeCount + ", hasKeyword=" + (cleanText.contains("目录") || cleanText.toLowerCase().contains("contents")));
-
-                    boolean isTocPage = cleanText.contains("目录") || cleanText.toLowerCase().contains("contents");
-                    if (!isTocPage) {
-                        int chapterPatternCount = TocTextParser.countChapterPatterns(text);
-                        if (tocLikeCount >= 5 && chapterPatternCount >= 2) {
+                    
+                    boolean isTocPage = false;
+                    
+                    if ("llm".equalsIgnoreCase(discoveryMode)) {
+                        // LLM Mode: Ask the model directly
+                        String prompt = "这是一本书的某一页。请判断这页是否是目录页（Table of Contents）的开始或一部分？\n" +
+                                "如果是，请回答“YES”；如果不是，请回答“NO”。\n" +
+                                "只回答 YES 或 NO，不要解释。";
+                        String response = discoveryEngine.doOCR(image, prompt).trim().toUpperCase();
+                        long pageScanDuration = System.currentTimeMillis() - pageScanStart;
+                        
+                        System.out.println("Discovery Scan Page " + i + " (LLM): " + pageScanDuration + "ms, Response=" + response);
+                        
+                        if (response.contains("YES") || response.contains("是")) {
                             isTocPage = true;
-                            System.out.println("   -> Detected as TOC by density (Lines=" + tocLikeCount + ", Patterns=" + chapterPatternCount + ")");
+                        }
+                    } else {
+                        // Text Mode (Local or API): Extract text and use regex
+                        // Force plain text prompt for detection
+                        String text = discoveryEngine.doOCR(image, "请仅输出图像中的文本内容。");
+                        long pageScanDuration = System.currentTimeMillis() - pageScanStart;
+
+                        String cleanText = text.replaceAll("\\s+", "");
+                        int tocLikeCount = TocTextParser.countTocLikeLines(text);
+
+                        System.out.println("Discovery Scan Page " + i + " (" + discoveryMode + "): " + pageScanDuration + "ms, length=" + text.length() + ", tocLines=" + tocLikeCount + ", hasKeyword=" + (cleanText.contains("目录") || cleanText.toLowerCase().contains("contents")));
+
+                        isTocPage = cleanText.contains("目录") || cleanText.toLowerCase().contains("contents");
+                        if (!isTocPage) {
+                            int chapterPatternCount = TocTextParser.countChapterPatterns(text);
+                            if (tocLikeCount >= 5 && chapterPatternCount >= 2) {
+                                isTocPage = true;
+                                System.out.println("   -> Detected as TOC by density (Lines=" + tocLikeCount + ", Patterns=" + chapterPatternCount + ")");
+                            }
                         }
                     }
 
@@ -75,9 +113,25 @@ public class OcrStrategy {
                         // Try to read subsequent pages
                         for (int j = i + 1; j < maxScan; j++) {
                             BufferedImage nextImageLow = renderer.renderImageWithDPI(j, 150);
-                            String nextTextLow = discoveryEngine.doOCR(nextImageLow, "请仅输出图像中的文本内容。");
+                            
+                            boolean isContinuation = false;
+                            if ("llm".equalsIgnoreCase(discoveryMode)) {
+                                String prompt = "这是目录的后续页吗？请判断这页是否包含目录条目。\n" +
+                                        "如果是，请回答“YES”；如果不是，请回答“NO”。\n" +
+                                        "只回答 YES 或 NO。";
+                                String response = discoveryEngine.doOCR(nextImageLow, prompt).trim().toUpperCase();
+                                System.out.println("   > Checking continuation Page " + j + " (LLM): " + response);
+                                if (response.contains("YES") || response.contains("是")) {
+                                    isContinuation = true;
+                                }
+                            } else {
+                                String nextTextLow = discoveryEngine.doOCR(nextImageLow, "请仅输出图像中的文本内容。");
+                                if (TocTextParser.countTocLikeLines(nextTextLow) > 3) {
+                                    isContinuation = true;
+                                }
+                            }
 
-                            if (TocTextParser.countTocLikeLines(nextTextLow) > 3) {
+                            if (isContinuation) {
                                 System.out.println(">>> Found TOC Continuation at Page " + j);
                                 tocImages.add(renderer.renderImageWithDPI(j, 300));
                             } else {
@@ -85,17 +139,19 @@ public class OcrStrategy {
                             }
                         }
 
+
                         // Batch OCR
-                        System.out.println(">>> Batch OCR for " + tocImages.size() + " pages (Batch Size: 3)...");
+                        System.out.println(">>> Batch OCR for " + tocImages.size() + " pages (Batch Size: " + batchSize + ")...");
+                        long batchStart = System.currentTimeMillis();
 
                         List<RawToc> allBatchRaws = new ArrayList<>();
                         StringBuilder allTextFallback = new StringBuilder();
 
-                        int batchSize = 3;
                         for (int k = 0; k < tocImages.size(); k += batchSize) {
                             int end = Math.min(k + batchSize, tocImages.size());
                             List<BufferedImage> batch = tocImages.subList(k, end);
                             System.out.println(">>> Processing Batch " + (k / batchSize + 1) + " (Pages " + k + " to " + (end - 1) + ")...");
+                            long batchItemStart = System.currentTimeMillis();
 
                             int maxRetries = 3;
                             int retryCount = 0;
@@ -104,7 +160,8 @@ public class OcrStrategy {
                             while (retryCount <= maxRetries) {
                                 try {
                                     String batchResult = ocrEngine.doOCR(batch, currentPrompt);
-                                    System.out.println("DEBUG: Batch " + (k / batchSize + 1) + " Try " + (retryCount + 1) + " Result:\n" + batchResult);
+                                    long batchItemDuration = System.currentTimeMillis() - batchItemStart;
+                                    System.out.println("DEBUG: Batch " + (k / batchSize + 1) + " Try " + (retryCount + 1) + " Result (" + batchItemDuration + "ms):\n" + batchResult);
 
                                     List<RawToc> batchRaws = TocTextParser.tryParseJson(batchResult);
 
@@ -273,12 +330,16 @@ public class OcrStrategy {
 
             // 3. Dynamic Page Alignment
             if (!raws.isEmpty()) {
+                long alignStart = System.currentTimeMillis();
                 for (RawToc r : raws) {
                     if (r.getTitle() != null) {
                         r.setTitle(r.getTitle().replaceAll("[…\\._—\\s]+\\d+$", "").trim());
                     }
                 }
-                pageAlignmentService.alignPageNumbers(doc, raws, ocrEngine);
+                // Use Discovery Engine (Fast Model) for Alignment Search
+                System.out.println(">>> Starting Page Alignment using Discovery Engine...");
+                pageAlignmentService.alignPageNumbers(doc, raws, discoveryEngine);
+                System.out.println(">>> Alignment completed in " + (System.currentTimeMillis() - alignStart) + "ms");
             }
 
             // 4. Generate Result
