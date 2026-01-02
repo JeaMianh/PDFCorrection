@@ -1,5 +1,5 @@
 <template>
-  <div v-if="visible" class="pdf-modal" @click="handleOverlayClick">
+  <div v-show="visible" class="pdf-modal" @click="handleOverlayClick">
     <div class="pdf-modal__content" :class="contentClass" @click.stop>
       <div class="pdf-modal__header">
         <h2>{{ title }}</h2>

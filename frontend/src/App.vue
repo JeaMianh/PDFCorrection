@@ -163,6 +163,7 @@
           <div class="pdf-viewer-body">
             <VuePdfApp 
               v-if="previewPdfUrl" 
+              :key="previewPdfUrl"
               :pdf="previewPdfUrl"
               theme="light"
               :config="pdfAppConfig"
@@ -698,13 +699,25 @@ export default {
         this.progressValue = 100;
 
         // 获取文件名
-        const disposition = response.headers['content-disposition'];
+        // const disposition = response.headers['content-disposition'];
+        // let filename = 'bookmarked_document.pdf';
+        // if (disposition && disposition.indexOf('attachment') !== -1) {
+        //   const filenameRegex = /filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/;
+        //   const matches = filenameRegex.exec(disposition);
+        //   if (matches != null && matches[1]) {
+        //     filename = matches[1].replace(/['"]/g, '');
+        //   }
+        // }
+        
+        // 使用原文件名 + 后缀
         let filename = 'bookmarked_document.pdf';
-        if (disposition && disposition.indexOf('attachment') !== -1) {
-          const filenameRegex = /filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/;
-          const matches = filenameRegex.exec(disposition);
-          if (matches != null && matches[1]) {
-            filename = matches[1].replace(/['"]/g, '');
+        if (this.selectedFile && this.selectedFile.name) {
+          const originalName = this.selectedFile.name;
+          const lastDotIndex = originalName.lastIndexOf('.');
+          if (lastDotIndex !== -1) {
+            filename = originalName.substring(0, lastDotIndex) + '_bookmarked.pdf';
+          } else {
+            filename = originalName + '_bookmarked.pdf';
           }
         }
 
@@ -755,6 +768,14 @@ export default {
       }
     }
   },
+
+  watch: {
+    showTocModal(val) {
+      if (!val) {
+        this.pdfAppInstance = null;
+      }
+    }
+  },
   
   beforeUnmount() {
     if (this.progressInterval) {
@@ -764,6 +785,12 @@ export default {
     // 关闭事件源
     if (this.eventSource) {
       this.eventSource.close();
+    }
+
+    // 清理 PDF 预览 URL
+    if (this.previewPdfUrl) {
+      URL.revokeObjectURL(this.previewPdfUrl);
+      this.previewPdfUrl = null;
     }
   }
 };
