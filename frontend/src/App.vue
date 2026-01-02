@@ -64,6 +64,14 @@
         {{ errorMessage }}
       </div>
 
+      <div v-if="successMessage" class="toast-success">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
+          <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path>
+          <polyline points="22 4 12 14.01 9 11.01"></polyline>
+        </svg>
+        {{ successMessage }}
+      </div>
+
       <div v-if="correctedFile" class="success-section">
         <div class="success-message">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
@@ -221,6 +229,7 @@ export default {
       isBookmarkProcessing: false,
       correctedFile: null,
       errorMessage: '',
+      successMessage: '',
       showPreviewModal: false,
       showTocModal: false,
       compareMode: false,
@@ -267,10 +276,20 @@ export default {
   methods: {
     onFileSelect() {
       this.errorMessage = '';
+      this.successMessage = '';
       // 文件改变时，清空目录缓存
       this.tocContent = null;
       this.tocData = [];
       this.lastProcessedFile = null;
+    },
+
+    showSuccessMessage(message) {
+      this.successMessage = message;
+      this.errorMessage = '';
+      // 3秒后自动消失
+      setTimeout(() => {
+        this.successMessage = '';
+      }, 3000);
     },
 
     showPreview() {
@@ -644,16 +663,9 @@ export default {
 
       this.isBookmarkProcessing = true;
       this.errorMessage = '';
-      // 使用当前编辑过的 tocData
-      if (this.tocData && this.tocData.length > 0 && this.lastProcessedFile === this.selectedFile) {
-        // 构造后端期望的格式
-        const payload = {
-          tableOfContents: this.tocData
-        };
-        formData.append('tocJson', JSON.stringify(payload));
-      } else this.progressValue = 0;
-      
-      // 模拟进度条，因为这个接口返回文件流，无法使用SSE
+      this.progressValue = 0;
+
+      // 模拟进度条
       if (this.progressInterval) clearInterval(this.progressInterval);
       this.progressInterval = setInterval(() => {
         if (this.progressValue < 90) {
@@ -664,9 +676,14 @@ export default {
 
       const formData = new FormData();
       formData.append('file', this.selectedFile);
-      
-      // 如果有缓存的目录结构且文件未变，传给后端，避免重复扫描
-      if (this.tocContent && this.lastProcessedFile === this.selectedFile) {
+
+      // 优先使用当前编辑过的 tocData
+      if (this.tocData && this.tocData.length > 0 && this.lastProcessedFile === this.selectedFile) {
+        // 直接发送数组，后端支持
+        formData.append('tocJson', JSON.stringify(this.tocData));
+      } 
+      // 如果没有编辑过的数据，但有缓存的原始内容（且文件未变），则使用缓存
+      else if (this.tocContent && this.lastProcessedFile === this.selectedFile) {
         formData.append('tocJson', this.tocContent);
       }
 
@@ -698,17 +715,18 @@ export default {
         link.setAttribute('download', filename);
         document.body.appendChild(link);
         link.click();
-        link.remove();
+
+        // 清理
         window.URL.revokeObjectURL(url);
+        if (this.progressInterval) clearInterval(this.progressInterval);
+        this.isBookmarkProcessing = false;
+        this.showSuccessMessage('PDF生成成功，正在下载...');
+
       } catch (error) {
         console.error('添加书签失败:', error);
-        this.errorMessage = '添加书签失败: ' + (error.message || '未知错误');
-      } finally {
+        this.errorMessage = '添加书签失败: ' + (error.response ? await error.response.data.text() : error.message);
         this.isBookmarkProcessing = false;
-        if (this.progressInterval) {
-          clearInterval(this.progressInterval);
-          this.progressInterval = null;
-        }
+        if (this.progressInterval) clearInterval(this.progressInterval);
       }
     },
 
@@ -856,6 +874,25 @@ html, body {
 }
 
 .error-message svg {
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
+  stroke-width: 2;
+}
+
+.toast-success {
+  margin-top: 30px;
+  padding: 15px;
+  background: #e6fffa;
+  border: 1px solid #b2f5ea;
+  border-radius: 8px;
+  color: #2c7a7b;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.toast-success svg {
   width: 24px;
   height: 24px;
   flex-shrink: 0;
