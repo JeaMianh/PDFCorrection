@@ -14,8 +14,15 @@
           v-for="row in visibleRows" 
           :key="row.originalIndex" 
           class="toc-row"
-          :class="{ 'active': activeIndex === row.originalIndex }"
+          :class="{ 
+            'active': activeIndex === row.originalIndex,
+            'drag-over-top': dragOverIndex === row.originalIndex && dragPosition === 'top',
+            'drag-over-bottom': dragOverIndex === row.originalIndex && dragPosition === 'bottom',
+            'is-dragging': draggingIndex === row.originalIndex
+          }"
           @click="handleRowClick(row.originalIndex); $emit('page-focus', row.item.page)"
+          @dragover.prevent="onDragOver($event, row.originalIndex)"
+          @drop="onDrop($event, row.originalIndex)"
         >
           <!-- 缩进控制区 -->
           <div class="indent-control" :style="{ width: (row.item.level * 24) + 'px' }">
@@ -84,6 +91,17 @@
             <button class="btn-icon delete" @click.stop="removeItem(row.originalIndex)" title="删除">
               <svg viewBox="0 0 24 24" width="18" height="18"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z" fill="currentColor"/></svg>
             </button>
+
+            <!-- 拖拽手柄 -->
+            <div 
+              class="drag-handle" 
+              draggable="true" 
+              @dragstart="onDragStart($event, row.originalIndex)"
+              @dragend="onDragEnd"
+              title="拖动排序"
+            >
+              <svg viewBox="0 0 24 24" width="16" height="16"><path d="M11 18c0 1.1-.9 2-2 2s-2-.9-2-2 .9-2 2-2 2 .9 2 2zm-2-8c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0-6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm6 4c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2zm0 2c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0 6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z" fill="currentColor"/></svg>
+            </div>
           </div>
         </div>
       </div>
@@ -117,7 +135,10 @@ export default {
     return {
       localToc: [],
       activeIndex: -1,
-      expandedState: {} // 存储每个条目的展开状态，key为条目索引
+      expandedState: {}, // 存储每个条目的展开状态，key为条目索引
+      draggingIndex: -1,
+      dragOverIndex: -1,
+      dragPosition: null // 'top' or 'bottom'
     };
   },
   computed: {
@@ -185,19 +206,113 @@ export default {
     },
     removeItem(index) {
       this.localToc.splice(index, 1);
+      if (this.activeIndex === index) {
+        this.activeIndex = -1;
+      } else if (this.activeIndex > index) {
+        this.activeIndex--;
+      }
       this.emitUpdate();
     },
     addItem() {
-      this.localToc.push({
+      const newItem = {
         level: 1,
         page: 1,
         title: ''
-      });
+      };
+
+      if (this.activeIndex >= 0 && this.activeIndex < this.localToc.length) {
+        // Insert after active item
+        // Inherit page number and level from active item
+        newItem.page = this.localToc[this.activeIndex].page;
+        newItem.level = this.localToc[this.activeIndex].level;
+        
+        this.localToc.splice(this.activeIndex + 1, 0, newItem);
+        this.activeIndex = this.activeIndex + 1;
+      } else {
+        this.localToc.push(newItem);
+        this.activeIndex = this.localToc.length - 1;
+      }
+
       this.emitUpdate();
       this.$nextTick(() => {
-        const container = this.$el.querySelector('.toc-list-container');
-        if (container) container.scrollTop = container.scrollHeight;
+        // Scroll to the new item
+        const activeRow = this.$el.querySelector('.toc-row.active');
+        if (activeRow) {
+          activeRow.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        } else {
+          const container = this.$el.querySelector('.toc-list-container');
+          if (container) container.scrollTop = container.scrollHeight;
+        }
       });
+    },
+    getSubtreeRange(startIndex) {
+      if (startIndex < 0 || startIndex >= this.localToc.length) return {start:0, end:0};
+      const startItem = this.localToc[startIndex];
+      let endIndex = startIndex + 1;
+      while (endIndex < this.localToc.length) {
+          if (this.localToc[endIndex].level <= startItem.level) {
+              break;
+          }
+          endIndex++;
+      }
+      return { start: startIndex, end: endIndex };
+    },
+    onDragStart(e, index) {
+      this.draggingIndex = index;
+      e.dataTransfer.effectAllowed = 'move';
+      // 尝试设置拖拽图像为整行，但由于我们只拖拽handle，可能需要调整
+      // 这里简单处理，让浏览器默认显示
+    },
+    onDragEnd() {
+      this.draggingIndex = -1;
+      this.dragOverIndex = -1;
+      this.dragPosition = null;
+    },
+    onDragOver(e, index) {
+      // 防止拖拽到自己或自己的子树中
+      const draggedRange = this.getSubtreeRange(this.draggingIndex);
+      if (index >= draggedRange.start && index < draggedRange.end) {
+          return; 
+      }
+
+      this.dragOverIndex = index;
+      
+      const rect = e.currentTarget.getBoundingClientRect();
+      const mid = rect.top + rect.height / 2;
+      this.dragPosition = e.clientY < mid ? 'top' : 'bottom';
+    },
+    onDrop(e, index) {
+      if (this.draggingIndex === -1) return;
+      
+      const draggedRange = this.getSubtreeRange(this.draggingIndex);
+      // 再次检查有效性
+      if (index >= draggedRange.start && index < draggedRange.end) return;
+
+      const targetRange = this.getSubtreeRange(index);
+      
+      let insertIndex;
+      if (this.dragPosition === 'top') {
+          insertIndex = targetRange.start;
+      } else {
+          // 如果是放在下面，应该是放在目标子树的后面
+          insertIndex = targetRange.end;
+      }
+      
+      const itemsToMove = this.localToc.slice(draggedRange.start, draggedRange.end);
+      
+      // 先删除
+      this.localToc.splice(draggedRange.start, itemsToMove.length);
+      
+      // 如果删除的位置在插入位置之前，插入位置需要前移
+      if (draggedRange.start < insertIndex) {
+          insertIndex -= itemsToMove.length;
+      }
+      
+      // 插入
+      this.localToc.splice(insertIndex, 0, ...itemsToMove);
+      
+      this.emitUpdate();
+      this.onDragEnd();
     },
     changeLevel(index, delta) {
       const newLevel = this.localToc[index].level + delta;
@@ -319,7 +434,8 @@ export default {
   transition: opacity 0.2s;
 }
 
-.toc-row:hover .move-controls {
+.toc-row:hover .move-controls,
+.toc-row:hover .drag-handle {
   opacity: 1;
 }
 
@@ -405,6 +521,34 @@ export default {
 .btn-icon.jump {
   color: #1a73e8;
   margin-right: 4px;
+}
+
+.drag-handle {
+  cursor: grab;
+  color: #9aa0a6;
+  display: flex;
+  align-items: center;
+  padding: 4px;
+  margin-left: 8px;
+  opacity: 0.3;
+  transition: opacity 0.2s;
+}
+
+.drag-handle:active {
+  cursor: grabbing;
+}
+
+.toc-row.drag-over-top {
+  border-top: 2px solid #1a73e8;
+}
+
+.toc-row.drag-over-bottom {
+  border-bottom: 2px solid #1a73e8;
+}
+
+.toc-row.is-dragging {
+  opacity: 0.5;
+  background: #f1f3f4;
 }
 
 .btn-icon.jump:hover {
