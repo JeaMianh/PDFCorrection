@@ -31,9 +31,11 @@ public class OcrStrategy {
     private int batchSize;
 
     private final PageAlignmentService pageAlignmentService;
+    private final com.example.pdfcorrection.service.ProgressService progressService;
 
-    public OcrStrategy(PageAlignmentService pageAlignmentService) {
+    public OcrStrategy(PageAlignmentService pageAlignmentService, com.example.pdfcorrection.service.ProgressService progressService) {
         this.pageAlignmentService = pageAlignmentService;
+        this.progressService = progressService;
     }
 
     public List<TocItem> extract(MultipartFile file, OcrEngine ocrEngine, OcrEngine providedDiscoveryEngine, String ocrPrompt) throws IOException {
@@ -60,6 +62,7 @@ public class OcrStrategy {
 
             // 1. Find TOC pages (OCR)
             long discoveryStart = System.currentTimeMillis();
+            progressService.sendProgress("正在查找目录...");
             for (int i = 0; i < maxScan; i++) { // PDFBox page index starts at 0
                 try {
                     // Phase 1: Quick Scan (150 DPI)
@@ -70,6 +73,7 @@ public class OcrStrategy {
                     
                     if ("llm".equalsIgnoreCase(discoveryMode)) {
                         // LLM Mode: Ask the model directly
+                        progressService.sendProgress("正在分析第 " + (i + 1) + " 页是否为目录页...");
                         String prompt = "这是一本书的某一页。请判断这页是否是目录页（Table of Contents）的开始或一部分？\n" +
                                 "如果是，请回答“YES”；如果不是，请回答“NO”。\n" +
                                 "只回答 YES 或 NO，不要解释。";
@@ -142,6 +146,7 @@ public class OcrStrategy {
 
                         // Batch OCR
                         System.out.println(">>> Batch OCR for " + tocImages.size() + " pages (Batch Size: " + batchSize + ")...");
+                        progressService.sendProgress("发现 " + tocImages.size() + " 页目录，开始提取内容...");
                         long batchStart = System.currentTimeMillis();
 
                         List<RawToc> allBatchRaws = new ArrayList<>();
@@ -151,6 +156,7 @@ public class OcrStrategy {
                             int end = Math.min(k + batchSize, tocImages.size());
                             List<BufferedImage> batch = tocImages.subList(k, end);
                             System.out.println(">>> Processing Batch " + (k / batchSize + 1) + " (Pages " + k + " to " + (end - 1) + ")...");
+                            progressService.sendProgress("正在提取第 " + (k + 1) + " 到 " + end + " 页目录内容...");
                             long batchItemStart = System.currentTimeMillis();
 
                             int maxRetries = 3;
@@ -338,6 +344,7 @@ public class OcrStrategy {
                 }
                 // Use Discovery Engine (Fast Model) for Alignment Search
                 System.out.println(">>> Starting Page Alignment using Discovery Engine...");
+                progressService.sendProgress("正在进行页码对齐...");
                 pageAlignmentService.alignPageNumbers(doc, raws, discoveryEngine);
                 System.out.println(">>> Alignment completed in " + (System.currentTimeMillis() - alignStart) + "ms");
             }

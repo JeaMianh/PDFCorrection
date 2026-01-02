@@ -60,19 +60,22 @@ public class ImprovedPdfBookmarkService {
     private final PdfBoxStrategy pdfBoxStrategy;
     private final OcrStrategy ocrStrategy;
     private final PdfBookmarkWriterService pdfBookmarkWriterService;
+    private final ProgressService progressService;
 
     public ImprovedPdfBookmarkService(TocDiscoveryService tocDiscoveryService,
                                       ExplicitTocStrategy explicitTocStrategy,
                                       LayoutStructureStrategy layoutStructureStrategy,
                                       PdfBoxStrategy pdfBoxStrategy,
                                       OcrStrategy ocrStrategy,
-                                      PdfBookmarkWriterService pdfBookmarkWriterService) {
+                                      PdfBookmarkWriterService pdfBookmarkWriterService,
+                                      ProgressService progressService) {
         this.tocDiscoveryService = tocDiscoveryService;
         this.explicitTocStrategy = explicitTocStrategy;
         this.layoutStructureStrategy = layoutStructureStrategy;
         this.pdfBoxStrategy = pdfBoxStrategy;
         this.ocrStrategy = ocrStrategy;
         this.pdfBookmarkWriterService = pdfBookmarkWriterService;
+        this.progressService = progressService;
     }
 
     /* ======================= Public API ======================= */
@@ -102,15 +105,18 @@ public class ImprovedPdfBookmarkService {
              PdfReader reader = new PdfReader(is);
              PdfDocument pdf = new PdfDocument(reader)) {
             // 1. Pre-scan: Find potential TOC pages
+            progressService.sendProgress("正在扫描PDF结构，查找目录页...");
             List<Integer> tocCandidatePages = tocDiscoveryService.findTocPages(pdf);
 
             // 2. Strategy A: Explicit TOC Page Parsing (High Precision)
             if (!tocCandidatePages.isEmpty()) {
+                progressService.sendProgress("发现潜在目录页，尝试解析...");
                 items = explicitTocStrategy.extract(pdf, tocCandidatePages);
             }
 
             // 3. Strategy B: Layout Structure Analysis (WPS Fallback)
             if (items.isEmpty()) {
+                progressService.sendProgress("尝试使用布局结构分析提取目录...");
                 items = layoutStructureStrategy.extract(pdf);
             }
         } catch (Exception e) {
@@ -120,6 +126,7 @@ public class ImprovedPdfBookmarkService {
         // 4. Strategy C: PDFBox Fallback (Solves iText font crashes)
         if (items == null || items.isEmpty()) {
             try {
+                progressService.sendProgress("尝试使用PDFBox提取文本...");
                 items = pdfBoxStrategy.extract(file);
             } catch (Exception e) {
                 System.err.println("PDFBox extraction failed: " + e.getMessage());
@@ -129,6 +136,7 @@ public class ImprovedPdfBookmarkService {
         // 5. Strategy D: OCR Fallback (For Scanned PDFs)
         if (items == null || items.isEmpty()) {
             try {
+                progressService.sendProgress("未找到文本目录，准备进行OCR识别...");
                 OcrEngine engine;
                 OcrEngine discoveryEngine;
                 
