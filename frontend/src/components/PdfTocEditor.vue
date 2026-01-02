@@ -128,9 +128,7 @@ export default {
 
       this.localToc.forEach((item, index) => {
         // 默认所有条目都是展开的
-        if (this.expandedState[index] === undefined) {
-          this.expandedState[index] = true;
-        }
+        const isExpanded = this.expandedState[index] !== false;
 
         // 如果当前条目的层级小于等于隐藏阈值，说明它跳出了之前的折叠区域
         if (item.level <= hideLevel) {
@@ -141,12 +139,12 @@ export default {
             item,
             originalIndex: index,
             hasChildren: this.hasChildren(index),
-            isExpanded: this.expandedState[index]
+            isExpanded: isExpanded
           });
 
           // 如果当前条目是折叠状态，且有子节点，则设置隐藏阈值
           // 任何层级大于当前条目的后续节点都将被隐藏
-          if (!this.expandedState[index]) {
+          if (!isExpanded) {
             hideLevel = item.level;
           }
         }
@@ -160,12 +158,7 @@ export default {
     modelValue: {
       handler(newVal) {
         this.localToc = JSON.parse(JSON.stringify(newVal || []));
-        // 初始化展开状态
-        this.localToc.forEach((_, index) => {
-          if (this.expandedState[index] === undefined) {
-            this.expandedState[index] = true;
-          }
-        });
+        // 清理多余的状态（可选），或者不做处理，因为 computed 中有默认值
       },
       immediate: true,
       deep: true
@@ -177,7 +170,12 @@ export default {
       return this.localToc[index + 1].level > this.localToc[index].level;
     },
     toggleExpand(index) {
-      this.expandedState[index] = !this.expandedState[index];
+      // 如果未定义，默认为 true，取反即为 false
+      if (this.expandedState[index] === undefined) {
+        this.expandedState[index] = false;
+      } else {
+        this.expandedState[index] = !this.expandedState[index];
+      }
     },
     emitUpdate() {
       this.$emit('update:modelValue', this.localToc);
@@ -209,14 +207,18 @@ export default {
       }
     },
     expandAll() {
+      const newState = {};
       this.localToc.forEach((_, index) => {
-        this.expandedState[index] = true;
+        newState[index] = true;
       });
+      this.expandedState = newState;
     },
     collapseAll() {
+      const newState = {};
       this.localToc.forEach((_, index) => {
-        this.expandedState[index] = false;
+        newState[index] = false;
       });
+      this.expandedState = newState;
     }
   }
 };
