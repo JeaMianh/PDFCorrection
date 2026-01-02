@@ -43,26 +43,66 @@ public class TocTextParser {
                 String title = (String) map.get("title");
                 Object pageObj = map.get("page");
 
-                if (title != null && pageObj != null) {
-                    int page = 0;
-                    if (pageObj instanceof Integer) {
-                        page = (Integer) pageObj;
-                    } else if (pageObj instanceof String) {
-                        String pageStr = ((String) pageObj).trim();
-                        // Handle "123" or "123-124" (take first)
-                        if (pageStr.contains("-")) {
-                            pageStr = pageStr.split("-")[0].trim();
-                        }
-                        if (!pageStr.isEmpty() && pageStr.matches("\\d+")) {
-                            try {
-                                page = Integer.parseInt(pageStr);
-                            } catch (NumberFormatException e) {
-                                // ignore
+                    if (title != null) {
+                        int page = 0;
+                        if (pageObj != null) {
+                            if (pageObj instanceof Integer) {
+                                page = (Integer) pageObj;
+                            } else if (pageObj instanceof String) {
+                                String pageStr = ((String) pageObj).trim();
+                                // Handle "123" or "123-124" (take first)
+                                if (pageStr.contains("-")) {
+                                    pageStr = pageStr.split("-")[0].trim();
+                                }
+                                if (!pageStr.isEmpty() && pageStr.matches("\\d+")) {
+                                    try {
+                                        page = Integer.parseInt(pageStr);
+                                    } catch (NumberFormatException e) {
+                                        // ignore
+                                    }
+                                }
                             }
                         }
-                    }
 
-                    RawToc raw = new RawToc(title, page);
+                        // Fallback: Extract page from title if not found in "page" field
+                        if (page <= 0) {
+                            // Match patterns like "Title ... 123", "Title 123", "Title...123"
+                            // We look for a number at the end of the string, preceded by dots, dashes, or spaces.
+                            // We must be careful not to match "Chapter 1" as page 1.
+                            // Usually page numbers are > 0.
+                            
+                            // Regex: 
+                            // 1. Separator: ... or .. or . or — or - or spaces
+                            // 2. Number: \d+
+                            // 3. End of line
+                            Matcher m = Pattern.compile("[…\\._—\\s]{2,}(\\d+)$").matcher(title);
+                            if (m.find()) {
+                                try {
+                                    page = Integer.parseInt(m.group(1));
+                                    // Clean title by removing the page number part
+                                    title = title.substring(0, m.start()).trim();
+                                } catch (NumberFormatException e) {}
+                            } else {
+                                // Try simpler pattern: space + number at end, but only if number is not part of the title text (heuristic)
+                                // e.g. "Chapter 1" -> No (1 is part of title)
+                                // "Introduction 5" -> Maybe
+                                // "Section 1.1 10" -> Yes (10 is page)
+                                Matcher m2 = Pattern.compile("\\s+(\\d+)$").matcher(title);
+                                if (m2.find()) {
+                                    String numStr = m2.group(1);
+                                    // Heuristic: If title ends with digit, check if it looks like a chapter number
+                                    boolean looksLikeChapterNum = title.matches(".*(Chapter|第.+章|Section|Part)\\s*" + numStr + "$");
+                                    if (!looksLikeChapterNum) {
+                                        try {
+                                            page = Integer.parseInt(numStr);
+                                            title = title.substring(0, m2.start()).trim();
+                                        } catch (NumberFormatException e) {}
+                                    }
+                                }
+                            }
+                        }
+
+                        RawToc raw = new RawToc(title, page);
 
                     // Parse Level
                     int level = 1;

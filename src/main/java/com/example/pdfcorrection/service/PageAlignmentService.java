@@ -39,7 +39,51 @@ public class PageAlignmentService {
                     .collect(Collectors.toList());
         }
 
-        if (anchors.isEmpty()) return;
+        if (anchors.isEmpty()) {
+            // Fallback: If no anchors found (e.g. OCR failed to read page numbers), try to find the first few titles
+            // to establish a baseline offset.
+            System.out.println("[Align] No anchors with page numbers found. Attempting Blind Search for first chapters...");
+
+            // Try first 3 items that look like chapters
+            List<RawToc> candidates = raws.stream()
+                    .filter(r -> r.getTitle() != null && r.getTitle().length() >= 4 && !r.getTitle().contains("..."))
+                    .limit(3)
+                    .collect(Collectors.toList());
+
+            boolean found = false;
+            for (RawToc candidate : candidates) {
+                // Assume logical page 1 for search purposes if 0
+                int assumedLogical = (candidate.getLogicalPage() > 0) ? candidate.getLogicalPage() : 1;
+
+                // Search in a wider range (e.g. 0 to 50)
+                int foundOffset = findOffsetForTitle(renderer, ocrEngine, candidate.getTitle(), assumedLogical, 0, 50, totalPages, true);
+
+                if (foundOffset != -999) {
+                    System.out.println("[Align]   > Found [" + candidate.getTitle() + "] with offset " + foundOffset + " (assuming logical " + assumedLogical + ")");
+
+                    // Apply this offset to all items
+                    int finalOffset = foundOffset;
+                    for (RawToc item : raws) {
+                        int log = (item.getLogicalPage() > 0) ? item.getLogicalPage() : 1;
+                        item.setPhysicalPage(log + finalOffset);
+                    }
+                    found = true;
+                    break;
+                }
+            }
+
+            if (!found) {
+                // If still nothing, we can't align. But we shouldn't drop them.
+                // Default to Physical Page 1 to prevent data loss.
+                System.out.println("[Align] Blind search failed. Defaulting all items to Physical Page 1 to prevent data loss.");
+                for (RawToc item : raws) {
+                    if (item.getPhysicalPage() <= 0) {
+                        item.setPhysicalPage(1);
+                    }
+                }
+            }
+            return;
+        }
 
         // === Phase 1: Sampling ===
         List<RawToc> samples = new ArrayList<>();
@@ -225,7 +269,8 @@ public class PageAlignmentService {
                         "2. 该标题必须是【大标题】（字号明显大于正文，通常居中或加粗）。\n" +
                         "3. 严禁匹配【页眉】！如果标题仅出现在页面顶部的页眉区域（字体较小，旁边可能有页码），请回答“否”。\n" +
                         "4. 严禁匹配【目录】！如果页面包含多个章节标题和页码，请回答“否”。\n" +
-                        "请只回答“是”或“否”。";
+                        "请只回答“是”或“否”。\n" +
+                        "请以 JSON 格式输出，格式为：{\"result\": \"是\"} 或 {\"result\": \"否\"}";
                 String response = ocrEngine.doOCR(topImage, prompt).trim();
 
                 if (response.contains("是") || response.toLowerCase().contains("yes")) {

@@ -43,17 +43,26 @@ public class OpenAiCompatibleEngine implements OcrEngine {
         payload.put("model", model);
         payload.put("max_tokens", 4096);
 
-        // 第一步：先创建thinking对应的嵌套Map，存储其内部的键值对
-        Map<String, Object> thinkingMap = new HashMap<>();
-        thinkingMap.put("type", "disable");
-        thinkingMap.put("clear_thinking", true);
+        // if (apiModel.equalsIgnoreCase("GLM-4.6V-Flash")) {
+        //     // 第一步：先创建thinking对应的嵌套Map，存储其内部的键值对
+        // Map<String, Object> thinkingMap = new HashMap<>();
+        // thinkingMap.put("type", "disable");
+        // thinkingMap.put("clear_thinking", true);
 
-        // 第二步：将嵌套Map作为值，放入顶层payload中
-        payload.put("thinking", thinkingMap);
+        // // 第二步：将嵌套Map作为值，放入顶层payload中
+        // payload.put("thinking", thinkingMap);
+        // }
         
         
-        // Request JSON format if supported (e.g. gpt-4o, gpt-3.5-turbo-0125)
-        if (model.contains("gpt") || model.contains("json")) {
+        
+        // Determine final prompt first to decide on response_format
+        String finalPrompt = (promptOverride != null && !promptOverride.isEmpty()) ? promptOverride : defaultPrompt;
+        if (finalPrompt == null || finalPrompt.isEmpty()) {
+            finalPrompt = "OCR this image. Output only the text content.";
+        }
+
+        // Request JSON format if supported (e.g. gpt-4o, gpt-3.5-turbo-0125) AND requested in prompt
+        if ((model.contains("gpt") || model.contains("json")) && finalPrompt.toLowerCase().contains("json")) {
             Map<String, String> responseFormat = new HashMap<>();
             responseFormat.put("type", "json_object");
             payload.put("response_format", responseFormat);
@@ -92,9 +101,7 @@ public class OpenAiCompatibleEngine implements OcrEngine {
         // 2. 后添加文本 Prompt (Text Last)
         Map<String, Object> textContent = new HashMap<>();
         textContent.put("type", "text");
-        // 使用 Override 的 Prompt，如果没有则使用默认配置的 Prompt，如果还没配置则使用兜底
-        String finalPrompt = (promptOverride != null && !promptOverride.isEmpty()) ? promptOverride : defaultPrompt;
-        textContent.put("text", finalPrompt != null && !finalPrompt.isEmpty() ? finalPrompt : "OCR this image. Output only the text content.");
+        textContent.put("text", finalPrompt);
         contentList.add(textContent);
 
         userMessage.put("content", contentList);
