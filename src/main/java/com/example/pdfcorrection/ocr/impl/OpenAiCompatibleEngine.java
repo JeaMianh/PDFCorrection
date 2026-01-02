@@ -106,27 +106,53 @@ public class OpenAiCompatibleEngine implements OcrEngine {
 
         HttpEntity<Map<String, Object>> request = new HttpEntity<>(payload, headers);
 
-        try {
-            ResponseEntity<Map> response = restTemplate.postForEntity(baseUrl + "/chat/completions", request, Map.class);
+        int maxRetries = 3;
+        int attempt = 0;
+        Exception lastException = null;
 
-            if (response.getBody() != null) {
-                if (response.getBody().containsKey("choices")) {
-                    List choices = (List) response.getBody().get("choices");
-                    if (!choices.isEmpty()) {
-                        Map choice = (Map) choices.get(0);
-                        Map message = (Map) choice.get("message");
-                        return (String) message.get("content");
+        while (attempt < maxRetries) {
+            try {
+                ResponseEntity<Map> response = restTemplate.postForEntity(baseUrl + "/chat/completions", request, Map.class);
+
+                if (response.getBody() != null) {
+                    if (response.getBody().containsKey("choices")) {
+                        List choices = (List) response.getBody().get("choices");
+                        if (!choices.isEmpty()) {
+                            Map choice = (Map) choices.get(0);
+                            Map message = (Map) choice.get("message");
+                            return (String) message.get("content");
+                        }
+                    } else if (response.getBody().containsKey("error")) {
+                        System.err.println("API Error Response: " + response.getBody());
+                        // If it's a rate limit or server error, we might want to retry.
+                        // For now, let's treat it as an exception to trigger retry.
+                        throw new RuntimeException("API Error: " + response.getBody());
+                    } else {
+                        System.err.println("Unknown API Response format: " + response.getBody());
                     }
-                } else if (response.getBody().containsKey("error")) {
-                    System.err.println("API Error Response: " + response.getBody());
-                } else {
-                    System.err.println("Unknown API Response format: " + response.getBody());
+                }
+                // If we got a valid response but no content, break loop and return empty?
+                // Or maybe retry? Let's assume success if we got here without exception.
+                return ""; 
+
+            } catch (Exception e) {
+                lastException = e;
+                attempt++;
+                System.err.println("API Request Failed (Attempt " + attempt + "/" + maxRetries + "): " + e.getMessage());
+                
+                if (attempt < maxRetries) {
+                    try {
+                        long sleepTime = 2000L * attempt; // Exponential backoff: 2s, 4s, ...
+                        System.out.println("Waiting " + sleepTime + "ms before retry...");
+                        Thread.sleep(sleepTime);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        throw new Exception("Interrupted during retry wait", ie);
+                    }
                 }
             }
-        } catch (Exception e) {
-            System.err.println("API Request Failed: " + e.getMessage());
-            throw e;
         }
-        return "";
+        
+        throw lastException != null ? lastException : new Exception("Unknown error after " + maxRetries + " attempts");
     }
 }

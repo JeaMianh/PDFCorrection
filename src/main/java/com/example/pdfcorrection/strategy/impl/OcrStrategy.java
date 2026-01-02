@@ -112,6 +112,13 @@ public class OcrStrategy {
                                     if (!batchRaws.isEmpty()) {
                                         allBatchRaws.addAll(batchRaws);
                                     } else {
+                                        // Parsing failed or empty result
+                                        if (retryCount < maxRetries) {
+                                            System.out.println(">>> Parsing failed (empty result). Retrying...");
+                                            retryCount++;
+                                            try { Thread.sleep(1000); } catch (InterruptedException ie) {}
+                                            continue;
+                                        }
                                         if (retryCount == maxRetries) {
                                             allTextFallback.append(batchResult).append("\n");
                                         }
@@ -154,6 +161,12 @@ public class OcrStrategy {
 
                                 } catch (Exception e) {
                                     System.err.println("Batch OCR Failed: " + e.getMessage());
+                                    if (retryCount < maxRetries) {
+                                        System.out.println(">>> Retrying batch due to exception...");
+                                        retryCount++;
+                                        try { Thread.sleep(1000); } catch (InterruptedException ie) {}
+                                        continue;
+                                    }
                                     break;
                                 }
                             }
