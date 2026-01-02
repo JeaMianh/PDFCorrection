@@ -150,43 +150,45 @@
     
     <!-- 目录结构预览模态框 -->
     <PdfModal v-model:visible="showTocModal" title="PDF目录结构预览" content-class="toc-modal">
-      <!-- 加载状态 -->
-      <div v-if="isBookmarkProcessing" class="toc-loading-container">
-        <div class="loading-spinner"></div>
-        <div class="loading-text">正在分析目录结构...</div>
-      </div>
-
-      <!-- 内容区域 -->
-      <div v-else class="toc-container">
-        <!-- 左侧 PDF 预览 -->
-        <div class="toc-pdf-preview">
-          <div class="pdf-viewer-body">
-            <VuePdfApp 
-              v-if="previewPdfUrl" 
-              :key="previewPdfUrl"
-              :pdf="previewPdfUrl"
-              theme="light"
-              :config="pdfAppConfig"
-              ref="pdfApp"
-              class="clean-pdf-viewer"
-              :page="currentPdfPage"
-              @pages-rendered="() => {}"
-              @page-changed="(page) => currentPdfPage = page"
-              @after-created="handlePdfAppCreated"
-            />
-            <div v-else class="loading-placeholder">加载 PDF 中...</div>
-          </div>
+      <div style="position: relative; height: 100%; width: 100%;">
+        <!-- 加载状态 -->
+        <div v-if="isBookmarkProcessing" class="toc-loading-overlay">
+          <div class="loading-spinner"></div>
+          <div class="loading-text">{{ tocLoadingText || '正在处理...' }}</div>
         </div>
 
-        <!-- 右侧 目录编辑 -->
-        <div class="toc-editor-panel">
-          <PdfTocEditor 
-            v-if="tocData && tocData.length > 0" 
-            v-model="tocData" 
-            @page-focus="handlePageFocus"
-          />
-          <div v-else-if="tocContent === '未获取到目录结构'" class="error-text">{{ tocContent }}</div>
-          <div v-else class="empty-text">暂无目录数据</div>
+        <!-- 内容区域 -->
+        <div class="toc-container">
+          <!-- 左侧 PDF 预览 -->
+          <div class="toc-pdf-preview">
+            <div class="pdf-viewer-body">
+              <VuePdfApp 
+                v-if="previewPdfUrl" 
+                :key="previewPdfUrl"
+                :pdf="previewPdfUrl"
+                theme="light"
+                :config="pdfAppConfig"
+                ref="pdfApp"
+                class="clean-pdf-viewer"
+                :page="currentPdfPage"
+                @pages-rendered="() => {}"
+                @page-changed="(page) => currentPdfPage = page"
+                @after-created="handlePdfAppCreated"
+              />
+              <div v-else class="loading-placeholder">加载 PDF 中...</div>
+            </div>
+          </div>
+
+          <!-- 右侧 目录编辑 -->
+          <div class="toc-editor-panel">
+            <PdfTocEditor 
+              v-if="tocData && tocData.length > 0" 
+              v-model="tocData" 
+              @page-focus="handlePageFocus"
+            />
+            <div v-else-if="tocContent === '未获取到目录结构'" class="error-text">{{ tocContent }}</div>
+            <div v-else class="empty-text">暂无目录数据</div>
+          </div>
         </div>
       </div>
       <template #footer>
@@ -251,6 +253,7 @@ export default {
       currentBatch: 0,  // 当前批次数
       tocContent: null,
       tocData: [], // 解析后的目录数据
+      tocLoadingText: '',
       lastProcessedFile: null, // 用于缓存目录预览的文件引用
       currentPdfPage: 1,
       pdfAppInstance: null, // 保存 PDF viewer 实例
@@ -399,27 +402,23 @@ export default {
       });
     },
 
-    async uploadAndCorrect() {
-      if (!this.selectedFile) {
-        this.errorMessage = '未选择文件';
-        return;
+    setupEventSource() {
+      if (this.eventSource) {
+        this.eventSource.close();
       }
-
-      this.isProcessing = true;
-      this.errorMessage = '';
-      this.startTime = Date.now();
-      this.progressValue = 0;
-      this.processSteps = []; // 清空之前的步骤
-      this.detectedAngle = null; // 重置角度显示
-      this.totalBatches = 0; // 重置批次计数
-      this.currentBatch = 0; // 重置当前批次
       
-      // 建立SSE连接以接收实时进度更新
       this.eventSource = new EventSource('http://localhost:8080/api/pdf/progress');
       
       this.eventSource.addEventListener('progress', (event) => {
         const message = event.data;
-        this.addProcessStep(message);
+        
+        // 如果是目录预览模式，更新预览状态文本
+        if (this.isBookmarkProcessing) {
+          this.tocLoadingText = message;
+        } else {
+          // 否则更新主流程步骤
+          this.addProcessStep(message);
+        }
         
         // 解析批次信息并更新进度
         const batchRegex = /批次 (\d+)\/(\d+) .*/;
@@ -450,6 +449,25 @@ export default {
       this.eventSource.onerror = (error) => {
         console.error('SSE连接错误:', error);
       };
+    },
+
+    async uploadAndCorrect() {
+      if (!this.selectedFile) {
+        this.errorMessage = '未选择文件';
+        return;
+      }
+
+      this.isProcessing = true;
+      this.errorMessage = '';
+      this.startTime = Date.now();
+      this.progressValue = 0;
+      this.processSteps = []; // 清空之前的步骤
+      this.detectedAngle = null; // 重置角度显示
+      this.totalBatches = 0; // 重置批次计数
+      this.currentBatch = 0; // 重置当前批次
+      
+      // 建立SSE连接以接收实时进度更新
+      this.setupEventSource();
 
       // 显示开始处理信息
       this.updateCurrentStep('开始处理PDF文件...');
@@ -554,7 +572,14 @@ export default {
       this.errorMessage = '';
       this.tocContent = null;
       this.showTocModal = true;
+      this.tocLoadingText = '正在初始化...';
       
+      // 建立SSE连接以接收实时进度更新
+      this.setupEventSource();
+
+      // 稍微延迟一下请求，确保SSE连接已建立
+      await new Promise(resolve => setTimeout(resolve, 500));
+
       // 更新预览 URL
       if (this.previewPdfUrl) {
         URL.revokeObjectURL(this.previewPdfUrl);
@@ -1081,12 +1106,18 @@ html, body {
   flex-direction: column;
 }
 
-.toc-loading-container {
+.toc-loading-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: #fff;
+  z-index: 10000;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  height: 100%;
   color: #5f6368;
 }
 
