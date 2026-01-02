@@ -2,6 +2,7 @@ package com.example.pdfcorrection.util;
 
 import com.example.pdfcorrection.model.RawToc;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.util.ArrayList;
@@ -36,7 +37,27 @@ public class TocTextParser {
             json = cleanOcrTypos(json);
 
             // 3. Parse
-            List<Map<String, Object>> list = objectMapper.readValue(json, new TypeReference<List<Map<String, Object>>>() {});
+            JsonNode rootNode = objectMapper.readTree(json);
+            List<Map<String, Object>> list = new ArrayList<>();
+
+            if (rootNode.isArray()) {
+                list = objectMapper.convertValue(rootNode, new TypeReference<List<Map<String, Object>>>() {});
+            } else if (rootNode.isObject()) {
+                // Check for common wrapper keys
+                String[] wrapperKeys = {"result", "items", "toc", "data", "chapters", "contents"};
+                for (String key : wrapperKeys) {
+                    if (rootNode.has(key) && rootNode.get(key).isArray()) {
+                        list = objectMapper.convertValue(rootNode.get(key), new TypeReference<List<Map<String, Object>>>() {});
+                        break;
+                    }
+                }
+                // Handle single item object
+                if (list.isEmpty() && rootNode.has("title")) {
+                     Map<String, Object> singleItem = objectMapper.convertValue(rootNode, new TypeReference<Map<String, Object>>() {});
+                     list.add(singleItem);
+                }
+            }
+
             List<RawToc> result = new ArrayList<>();
 
             for (Map<String, Object> map : list) {
