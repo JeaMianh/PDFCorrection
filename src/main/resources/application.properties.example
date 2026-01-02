@@ -1,0 +1,34 @@
+
+server.port=8080
+
+
+spring.servlet.multipart.enabled=true
+spring.servlet.multipart.max-file-size=500MB
+spring.servlet.multipart.max-request-size=500MB
+
+
+file.upload-dir=uploads
+pdf.correction.dpi=150
+pdf.correction.min-angle=0
+pdf.correction.compression.quality=0.8
+pdf.correction.batch-size=15
+
+# Discovery Mode: local (Tesseract), api (Extract text via API then regex), or llm (Ask LLM directly YES/NO)
+# pdf.ocr.discovery-mode=local
+# pdf.ocr.discovery-mode=api
+pdf.ocr.discovery-mode=llm
+
+
+# OCR Configuration
+pdf.ocr.api.base-url=YOUR_BASE_URL
+pdf.ocr.api.api-key=YOUR_API_KEI
+pdf.ocr.api.model=YOUR_MODEL
+
+# Batch size for OCR requests 
+pdf.ocr.batch-size=3
+
+# Optional: High Precision Model for Extraction. If empty, uses pdf.ocr.api.model
+# Optional: Use different credentials for extraction model
+pdf.ocr.api.extraction-base-url=YOUR_BASE_URL
+pdf.ocr.api.extraction-api-key=YOUR_API_KEI
+pdf.ocr.api.extraction-model=YOUR_MODEL
