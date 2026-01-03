@@ -117,17 +117,27 @@ public class OpenAiCompatibleEngine implements OcrEngine {
         int attempt = 0;
         Exception lastException = null;
 
+        // Ensure baseUrl is absolute
+        String finalBaseUrl = baseUrl;
+        if (!finalBaseUrl.startsWith("http://") && !finalBaseUrl.startsWith("https://")) {
+            finalBaseUrl = "https://" + finalBaseUrl;
+        }
+        // Remove trailing slash if present to avoid double slashes with endpoint
+        if (finalBaseUrl.endsWith("/")) {
+            finalBaseUrl = finalBaseUrl.substring(0, finalBaseUrl.length() - 1);
+        }
+
         while (attempt < maxRetries) {
             long start = System.currentTimeMillis();
             try {
                 // Debug Log: Request
                 if (attempt == 0) {
-                    System.out.println(">>> API Request [" + model + "] to " + baseUrl);
+                    System.out.println(">>> API Request [" + model + "] to " + finalBaseUrl);
                     System.out.println("    Prompt: " + (finalPrompt.length() > 100 ? finalPrompt.substring(0, 100) + "..." : finalPrompt));
                     System.out.println("    Images: " + images.size());
                 }
 
-                ResponseEntity<Map> response = restTemplate.postForEntity(baseUrl + "/chat/completions", request, Map.class);
+                ResponseEntity<Map> response = restTemplate.postForEntity(finalBaseUrl + "/chat/completions", request, Map.class);
                 long duration = System.currentTimeMillis() - start;
 
                 if (response.getBody() != null) {

@@ -123,18 +123,24 @@ public class ImprovedPdfBookmarkController {
         }
     }
 
+    // Cache for TOC extraction tasks: Key = Filename_Size, Value = Future
+    private final Map<String, java.util.concurrent.CompletableFuture<List<TocItem>>> tocExtractionCache = new java.util.concurrent.ConcurrentHashMap<>();
+
     /**
      * 预览识别的目录结构(不生成文件)
      * @param file 上传的PDF文件
      * @param includeScore 是否包含评分信息(可选,默认false)
+     * @param forceRefresh 是否强制刷新缓存(可选,默认false)
      * @return 识别出的目录结构JSON
      */
     @PostMapping(value = "/preview-toc", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
     public ResponseEntity<String> previewTableOfContents(
             @RequestParam("file") MultipartFile file,
-            @RequestParam(value = "includeScore", defaultValue = "false") boolean includeScore) {
+            @RequestParam(value = "includeScore", defaultValue = "false") boolean includeScore,
+            @RequestParam(value = "forceRefresh", defaultValue = "false") boolean forceRefresh) {
 
         long startTime = System.currentTimeMillis();
+        String cacheKey = file.getOriginalFilename() + "_" + file.getSize();
 
         try {
             // 文件验证
@@ -146,10 +152,48 @@ public class ImprovedPdfBookmarkController {
                         .body(createErrorResponse(validation.getMessage()));
             }
 
-            logger.info("Extracting TOC from: {}", file.getOriginalFilename());
+            java.util.concurrent.CompletableFuture<List<TocItem>> future;
 
-            // 提取目录
-            List<TocItem> tocItems = pdfBookmarkService.extractTocItems(file);
+            if (forceRefresh) {
+                tocExtractionCache.remove(cacheKey);
+            }
+
+            // Try to get existing task
+            future = tocExtractionCache.get(cacheKey);
+
+            if (future == null) {
+                logger.info("Starting new TOC extraction task for: {}", file.getOriginalFilename());
+                future = java.util.concurrent.CompletableFuture.supplyAsync(() -> {
+                    try {
+                        return pdfBookmarkService.extractTocItems(file);
+                    } catch (Exception e) {
+                        throw new java.util.concurrent.CompletionException(e);
+                    }
+                });
+                tocExtractionCache.put(cacheKey, future);
+            } else {
+                logger.info("Joining existing TOC extraction task for: {}", file.getOriginalFilename());
+            }
+
+            List<TocItem> tocItems;
+            try {
+                tocItems = future.join();
+            } catch (Exception e) {
+                logger.warn("Cached task failed for {}, retrying with current file. Error: {}", file.getOriginalFilename(), e.getMessage());
+                // Remove failed future
+                tocExtractionCache.remove(cacheKey);
+
+                // Retry with current file
+                future = java.util.concurrent.CompletableFuture.supplyAsync(() -> {
+                    try {
+                        return pdfBookmarkService.extractTocItems(file);
+                    } catch (Exception ex) {
+                        throw new java.util.concurrent.CompletionException(ex);
+                    }
+                });
+                tocExtractionCache.put(cacheKey, future);
+                tocItems = future.join();
+            }
 
             long duration = System.currentTimeMillis() - startTime;
 
@@ -172,11 +216,15 @@ public class ImprovedPdfBookmarkController {
 
         } catch (IOException e) {
             logger.error("IO error extracting TOC: {}", e.getMessage(), e);
+            // Clean up cache on error
+            tocExtractionCache.remove(cacheKey);
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
                     .contentType(MediaType.APPLICATION_JSON)
                     .body(createErrorResponse("文件读取失败: " + e.getMessage()));
         } catch (Exception e) {
             logger.error("Unexpected error extracting TOC: {}", e.getMessage(), e);
+            // Clean up cache on error
+            tocExtractionCache.remove(cacheKey);
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
                     .contentType(MediaType.APPLICATION_JSON)
                     .body(createErrorResponse("系统错误: " + e.getMessage()));
