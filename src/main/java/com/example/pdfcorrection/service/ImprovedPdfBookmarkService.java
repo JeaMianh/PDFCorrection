@@ -49,6 +49,9 @@ public class ImprovedPdfBookmarkService {
     @Value("${pdf.ocr.api.extraction-base-url:}")
     private String extractionApiBaseUrl;
 
+    @Value("${pdf.ocr.api.enable-high-precision:true}")
+    private boolean enableHighPrecision;
+
     @Value("${pdf.ocr.prompt:请识别图片中的目录内容。请严格按照图片中的顺序，输出一个扁平的 JSON 数组。每个元素包含 'title' (完整的章节标题，必须包含章节编号，如'1.1 绪论'，或'第一章 标题')、'page' (页码) 和 'level' (层级，整数，1表示一级标题，2表示二级标题，以此类推) 三个字段。\\n**关键要求**：\\n1. **完整性**：绝对不要遗漏章节编号！例如图片显示 '1.1.1 数据结构'，title 必须是 '1.1.1 数据结构'。\\n2. **层级判断** (综合判断)：\\n   - **语义编号** (优先)：'第一部/编' > '第一章' > '第一节'。例如：如果有'第一部'，则'第一部'是Level 1，'第一章'是Level 2。如果没有'部'，则'第一章'是Level 1。\\n   - **缩进**：在编号不明确时，缩进越深 level 越大。\\n   - **字体**：字号大或加粗的通常层级更高。\\n3. **页码**：如果某行没有页码，page 字段留空字符串。\\n不要输出 Markdown 标记，只输出 JSON。}")
     private String ocrPrompt;
 
@@ -149,14 +152,22 @@ public class ImprovedPdfBookmarkService {
                     discoveryEngine = new OpenAiCompatibleEngine(apiKey, apiBaseUrl, apiModel, ocrPrompt, restTemplate);
                     
                     // 2. Extraction Engine (High Precision)
-                    if (extractionApiModel != null && !extractionApiModel.trim().isEmpty()) {
+                    boolean isPlaceholder = extractionApiModel != null && extractionApiModel.contains("YOUR_MODEL");
+                    
+                    if (enableHighPrecision && extractionApiModel != null && !extractionApiModel.trim().isEmpty() && !isPlaceholder) {
                         System.out.println("  Extraction Engine Model: " + extractionApiModel);
-                        String effectiveExtractionKey = (extractionApiKey != null && !extractionApiKey.trim().isEmpty()) ? extractionApiKey : apiKey;
-                        String effectiveExtractionUrl = (extractionApiBaseUrl != null && !extractionApiBaseUrl.trim().isEmpty()) ? extractionApiBaseUrl : apiBaseUrl;
+                        String effectiveExtractionKey = (extractionApiKey != null && !extractionApiKey.trim().isEmpty() && !extractionApiKey.contains("YOUR_API_KEY")) ? extractionApiKey : apiKey;
+                        String effectiveExtractionUrl = (extractionApiBaseUrl != null && !extractionApiBaseUrl.trim().isEmpty() && !extractionApiBaseUrl.contains("YOUR_BASE_URL")) ? extractionApiBaseUrl : apiBaseUrl;
                         
                         engine = new OpenAiCompatibleEngine(effectiveExtractionKey, effectiveExtractionUrl, extractionApiModel, ocrPrompt, restTemplate);
                     } else {
-                        System.out.println("  Extraction Engine Model: " + apiModel + " (Fallback to Discovery Model)");
+                        if (!enableHighPrecision) {
+                            System.out.println("  High Precision Extraction Disabled. Using Discovery Model.");
+                        } else if (isPlaceholder) {
+                            System.out.println("  Extraction Model is configured with placeholder values. Fallback to Discovery Model: " + apiModel);
+                        } else {
+                            System.out.println("  Extraction Engine Model not configured. Fallback to Discovery Model: " + apiModel);
+                        }
                         engine = discoveryEngine;
                     }
                 } else {

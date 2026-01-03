@@ -19,18 +19,70 @@ public class PageAlignmentService {
     /**
      * Dynamic Page Alignment
      * Strategy Optimization:
+     * 0. Priority: Check PDF Page Labels (Metadata).
      * 1. Quick Pre-check: Sample 3 points (First, Middle, Last) to calculate offset.
      * 2. If offsets are consistent, apply globally.
      * 3. If inconsistent, fallback to segment-based alignment.
      */
     public void alignPageNumbers(PDDocument doc, List<RawToc> raws, OcrEngine ocrEngine) {
+        // === Strategy 0: PDF Page Labels (Metadata) ===
+        // Many PDFs contain metadata mapping physical pages to logical page labels (e.g., "i", "ii", "1", "2").
+        // If available, this is the fastest and most accurate method.
+        try {
+            org.apache.pdfbox.pdmodel.common.PDPageLabels pageLabels = doc.getDocumentCatalog().getPageLabels();
+            if (pageLabels != null) {
+                System.out.println("[Align] PDF Page Labels found. Attempting metadata alignment...");
+                String[] labels = pageLabels.getLabelsByPageIndices();
+                Map<String, Integer> labelToPhysicalMap = new java.util.HashMap<>();
+                
+                // Build map: Label -> Physical Page Index (0-based)
+                for (int i = 0; i < labels.length; i++) {
+                    labelToPhysicalMap.put(labels[i], i);
+                }
+                
+                boolean anyMatched = false;
+                for (RawToc item : raws) {
+                    if (item.getLogicalPage() > 0) {
+                        String key = String.valueOf(item.getLogicalPage());
+                        if (labelToPhysicalMap.containsKey(key)) {
+                            // PDFBox returns 0-based index for physical pages.
+                            // Our system expects 1-based physical pages for the final output.
+                            // So we add 1 to convert 0-based index to 1-based page number.
+                            item.setPhysicalPage(labelToPhysicalMap.get(key) + 1); 
+                            anyMatched = true;
+                        }
+                    }
+                }
+                
+                if (anyMatched) {
+                    System.out.println("[Align] Metadata alignment successful. Skipping visual alignment.");
+                    return;
+                } else {
+                    System.out.println("[Align] Page Labels exist but no TOC items matched (e.g. TOC uses '1' but Labels use 'i'). Falling back to visual alignment.");
+                }
+            }
+        } catch (Exception e) {
+            System.err.println("[Align] Failed to read Page Labels: " + e.getMessage());
+        }
+
         PDFRenderer renderer = new PDFRenderer(doc);
         int totalPages = doc.getNumberOfPages();
 
         // Filter anchors (Level 1, has page, title length >= 2)
-        List<RawToc> anchors = raws.stream()
-                .filter(r -> r.getLevel() == 1 && r.getLogicalPage() > 0 && r.getTitle() != null && r.getTitle().length() >= 2)
-                .collect(Collectors.toList());
+        // Modified: Include first 3 items regardless of level to capture Preface/Introduction
+        List<RawToc> anchors = new ArrayList<>();
+        for (int i = 0; i < raws.size(); i++) {
+            RawToc r = raws.get(i);
+            if (r.getLogicalPage() <= 0 || r.getTitle() == null || r.getTitle().length() < 2) continue;
+            
+            boolean isLevel1 = r.getLevel() == 1;
+            // Include first 3 items to ensure we capture Preface, Forward, etc. even if they are Level 2
+            boolean isStartItem = (i < 3); 
+            
+            if (isLevel1 || isStartItem) {
+                anchors.add(r);
+            }
+        }
 
         if (anchors.isEmpty()) {
             // Fallback to Level 2 if no Level 1 exists
@@ -91,7 +143,8 @@ public class PageAlignmentService {
         List<RawToc> samples = new ArrayList<>();
         if (!anchors.isEmpty()) samples.add(anchors.get(0)); // First
         if (anchors.size() > 1) samples.add(anchors.get(1)); // Second
-        if (anchors.size() > 10) samples.add(anchors.get(anchors.size() / 2)); // Middle
+        // Always try to sample middle if we have enough items (>= 5)
+        if (anchors.size() >= 5) samples.add(anchors.get(anchors.size() / 2)); // Middle
         if (anchors.size() > 2) {
             int lastIndex = anchors.size() - 1;
             if (anchors.size() > 3) {
@@ -184,9 +237,11 @@ public class PageAlignmentService {
 
             boolean isFirstItem = (lastLogicalPage == -1);
             boolean isPageReset = (lastLogicalPage != -1 && item.getLogicalPage() < lastLogicalPage);
-            boolean isMajorChapter = item.getTitle() != null && item.getTitle().matches("^(第[一二三四五六七八九十\\d]+[章部篇]|Chapter\\s*\\d+).*");
+            boolean isMajorChapter = (item.getTitle() != null && item.getTitle().matches("^(第[一二三四五六七八九十\\d]+[章部篇]|Chapter\\s*\\d+|附录|Appendix).*")) || item.getLevel() == 1;
             boolean isSamePage = (item.getLogicalPage() == lastLogicalPage);
-            boolean shouldSearch = (isFirstItem || isPageReset || isMajorChapter) && !isSamePage;
+            
+            // Only trigger search on Page Reset if it also looks like a Major Chapter (to avoid checking subsections due to OCR hallucination)
+            boolean shouldSearch = (isFirstItem || (isPageReset && isMajorChapter) || isMajorChapter) && !isSamePage;
 
             if (shouldSearch) {
                 if (item.getTitle() != null && item.getTitle().length() >= 2) {
@@ -252,7 +307,13 @@ public class PageAlignmentService {
 
         for (int k : searchOrder) {
             int offset = baseOffset + k;
-            int guessPhys = logicalPage + offset;
+            // PDFBox uses 0-based index for rendering.
+            // logicalPage is 1-based (from book).
+            // offset is the difference.
+            // So guessPhys (0-based) = logicalPage + offset - 1
+            // Example: Logical 1, Offset 14 (starts at 15th page).
+            // guessPhys = 1 + 14 - 1 = 14 (which is the 15th page, index 14).
+            int guessPhys = logicalPage + offset - 1;
 
             if (guessPhys < 0 || guessPhys >= totalPages) continue;
 
