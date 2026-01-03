@@ -163,9 +163,22 @@ public class OcrStrategy {
                             int retryCount = 0;
                             String currentPrompt = null;
 
+                            // Construct a robust prompt to prevent hallucination
+                            String basePrompt = (ocrPrompt != null && !ocrPrompt.isEmpty()) ? ocrPrompt : 
+                                    "请识别图片中的目录内容。请严格按照图片中的顺序，输出一个扁平的 JSON 数组。每个元素包含 'title' (完整的章节标题，必须包含章节编号)、'page' (页码) 和 'level' (层级，1-4)。";
+                            
+                            String antiHallucination = "\n\n**IMPORTANT**: \n" +
+                                    "1. Strictly output ONLY the text visible in the images.\n" +
+                                    "2. Do NOT predict or complete the table of contents.\n" +
+                                    "3. If the text ends, stop the JSON array immediately.\n" +
+                                    "4. Do NOT generate chapters that are not present in the image.";
+                            
+                            String initialPrompt = basePrompt + antiHallucination;
+
                             while (retryCount <= maxRetries) {
                                 try {
-                                    String batchResult = ocrEngine.doOCR(batch, currentPrompt);
+                                    String promptToUse = (currentPrompt != null) ? currentPrompt : initialPrompt;
+                                    String batchResult = ocrEngine.doOCR(batch, promptToUse);
                                     long batchItemDuration = System.currentTimeMillis() - batchItemStart;
                                     System.out.println("DEBUG: Batch " + (k / batchSize + 1) + " Try " + (retryCount + 1) + " Result (" + batchItemDuration + "ms):\n" + batchResult);
 
@@ -177,6 +190,54 @@ public class OcrStrategy {
                                     }
 
                                     if (!batchRaws.isEmpty()) {
+                                        // NEW: Overlap/Hallucination Detection (Enhanced)
+                                        if (!allBatchRaws.isEmpty()) {
+                                            int bestCutIndex = -1;
+                                            // Check first 50 items (increased from 10) of new batch to find ANY anchor in the old batch
+                                            // This handles cases where the overlap happens after a few new items (e.g. filling a gap)
+                                            int checkRange = Math.min(batchRaws.size(), 50); 
+                                            
+                                            for (int n = 0; n < checkRange; n++) {
+                                                RawToc newItem = batchRaws.get(n);
+                                                String newTitle = newItem.getTitle().replaceAll("\\s+", "").toLowerCase();
+                                                if (newTitle.length() < 2) continue; // Skip very short titles
+
+                                                // Search backwards in allBatchRaws (entire tail)
+                                                // We search from end to start to find the LATEST occurrence (closest to the cut point)
+                                                for (int j = allBatchRaws.size() - 1; j >= 0; j--) {
+                                                    RawToc existingItem = allBatchRaws.get(j);
+                                                    String existingTitle = existingItem.getTitle().replaceAll("\\s+", "").toLowerCase();
+                                                    
+                                                    boolean match = false;
+                                                    if (existingTitle.equals(newTitle)) match = true;
+                                                    else if (existingTitle.length() > 5 && newTitle.length() > 5) {
+                                                        if (existingTitle.contains(newTitle) || newTitle.contains(existingTitle)) match = true;
+                                                    }
+                                                    
+                                                    if (match) {
+                                                        // Only accept match if it looks like a chapter/section or is long enough
+                                                        // This avoids matching generic words like "Summary" if they appear frequently
+                                                        // Also accept if it matches "Chapter X" pattern
+                                                        boolean isChapter = newItem.getTitle().matches("^(第[一二三四五六七八九十\\d]+[章部篇]|Chapter\\s*\\d+).*");
+                                                        if (isChapter || newItem.getTitle().matches(".*\\d+\\.\\d+.*") || newItem.getTitle().length() > 6) {
+                                                             bestCutIndex = j;
+                                                             System.out.println(">>> Overlap/Hallucination detected: New item '" + newItem.getTitle() + 
+                                                                     "' matches old item '" + existingItem.getTitle() + "' at index " + j);
+                                                             break; 
+                                                        }
+                                                    }
+                                                }
+                                                if (bestCutIndex != -1) break; // Found a valid cut point
+                                            }
+                                            
+                                            if (bestCutIndex != -1) {
+                                                 System.out.println(">>> Pruning hallucinated/overlapped tail from index " + bestCutIndex);
+                                                 while (allBatchRaws.size() > bestCutIndex) {
+                                                     allBatchRaws.remove(allBatchRaws.size() - 1);
+                                                 }
+                                            }
+                                        }
+                                        
                                         allBatchRaws.addAll(batchRaws);
                                     } else {
                                         // Parsing failed or empty result
@@ -322,15 +383,31 @@ public class OcrStrategy {
             }
 
             // 2.5 Backfill page numbers
+            // Modified: Smart backfill for container nodes (Parts/Volumes)
             for (int i = 0; i < raws.size(); i++) {
-                if (raws.get(i).getLogicalPage() == -1) {
+                RawToc current = raws.get(i);
+                
+                // Skip "Table of Contents" itself
+                if (current.getTitle() != null && current.getTitle().matches("^(目录|Contents|Table of Contents)$")) {
+                    current.setLogicalPage(-999); // Mark for deletion
+                    continue;
+                }
+
+                if (current.getLogicalPage() <= 0) {
+                    // Look ahead for the first valid page number
                     for (int j = i + 1; j < raws.size(); j++) {
-                        if (raws.get(j).getLogicalPage() != -1) {
-                            raws.get(i).setLogicalPage(raws.get(j).getLogicalPage());
+                        RawToc next = raws.get(j);
+                        if (next.getLogicalPage() > 0) {
+                            // Only inherit if the next item is a child (higher level number) or same level
+                            // e.g. Part 1 (L1) -> Chapter 1 (L2, Page 10) => Part 1 gets Page 10
+                            if (next.getLevel() >= current.getLevel()) {
+                                current.setLogicalPage(next.getLogicalPage());
+                            }
                             break;
                         }
                     }
-                    if (raws.get(i).getLogicalPage() == -1) raws.get(i).setLogicalPage(1);
+                    // If still no page (e.g. end of list), default to 1 or keep as invalid
+                    if (current.getLogicalPage() <= 0) current.setLogicalPage(1);
                 }
             }
 
@@ -351,7 +428,13 @@ public class OcrStrategy {
 
             // 4. Generate Result
             for (RawToc r : raws) {
-                int physicalPage = (r.getPhysicalPage() > 0) ? r.getPhysicalPage() + 1 : r.getLogicalPage();
+                // Skip items marked for deletion
+                if (r.getLogicalPage() == -999) continue;
+
+                // If physical page is set (by PageAlignmentService), use it directly.
+                // Otherwise, fallback to logical page (which is likely wrong but better than nothing).
+                // Note: PageAlignmentService already converts to 1-based index.
+                int physicalPage = (r.getPhysicalPage() > 0) ? r.getPhysicalPage() : r.getLogicalPage();
 
                 if (physicalPage > 0 && physicalPage <= doc.getNumberOfPages()) {
                     TocItem item = new TocItem();

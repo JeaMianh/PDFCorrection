@@ -140,7 +140,7 @@ public class TocTextParser {
 
                     // Regex Verification for Level
                     int regexLevel = inferLevel(title);
-                    if (regexLevel != 2) { // 2 is the default fallback in inferLevel
+                    if (regexLevel > 0) { 
                         raw.setLevel(regexLevel);
                     } else {
                         // Trust AI if regex is inconclusive
@@ -260,36 +260,39 @@ public class TocTextParser {
 
     /**
      * Static level inference tool.
+     * Returns 0 if uncertain.
      */
     public static int inferLevel(String title) {
         String t = title.trim();
 
         // Level 1: Part/Volume (Highest)
-        if (t.matches("^第[一二三四五六七八九十百]+[部编].*")) {
+        if (t.matches("^第\\s*[一二三四五六七八九十百0-9]+\\s*[部编].*") || t.matches("^Part\\s*\\d+.*")) {
             return 1;
         }
 
-        // Level 1 (Correction): Chapter is usually Level 1 unless there is a Part.
-        // Here we map Chapter to 1 initially.
-        if (t.matches("^第[一二三四五六七八九十百]+[章].*")) {
+        // Level 1: Chapter
+        // Support "第1章", "第一章", "Chapter 1"
+        if (t.matches("^第\\s*[一二三四五六七八九十百0-9]+\\s*[章].*") || 
+            t.matches("^Chapter\\s*\\d+.*") ||
+            t.matches("^(前言|绪论|引言|附录|参考文献|索引|Preface|Introduction|Appendix|Reference|Index).*")) {
             return 1;
+        }
+
+        // Level 3: X.X.X (Check this BEFORE Level 2 to avoid partial match)
+        if (t.matches("^\\d+\\.\\d+\\.\\d+.*")) {
+            return 3;
         }
 
         // Level 2: Section, 1.1, (一)
-        if (t.matches("^第[一二三四五六七八九十百]+[节].*") || t.matches("^\\d+\\.\\d+.*")) {
+        if (t.matches("^第\\s*[一二三四五六七八九十百0-9]+\\s*[节].*") || t.matches("^\\d+\\.\\d+.*")) {
             return 2;
-        }
-
-        // Level 3: X.X.X (e.g. 1.1.1)
-        if (t.matches("^\\d+\\.\\d+\\.\\d+.*")) {
-            return 3;
         }
 
         // Other cases
         if (t.matches("^[一二三四五六七八九十百]+[、\\s].*")) return 2;
         if (t.matches("^[(（][一二三四五六七八九十百]+[)）].*")) return 3;
 
-        // Fallback: 2 (Uncertain)
-        return 2;
+        // Fallback: 0 (Uncertain)
+        return 0;
     }
 }
