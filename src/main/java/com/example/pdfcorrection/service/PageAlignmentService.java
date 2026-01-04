@@ -69,18 +69,31 @@ public class PageAlignmentService {
         int totalPages = doc.getNumberOfPages();
 
         // Filter anchors (Level 1, has page, title length >= 2)
-        // Modified: Include first 3 items regardless of level to capture Preface/Introduction
+        // Strategy: Prioritize Level 1 items. Only fallback to "start items" (Preface etc.) if Level 1 items are scarce.
         List<RawToc> anchors = new ArrayList<>();
-        for (int i = 0; i < raws.size(); i++) {
-            RawToc r = raws.get(i);
-            if (r.getLogicalPage() <= 0 || r.getTitle() == null || r.getTitle().length() < 2) continue;
-            
-            boolean isLevel1 = r.getLevel() == 1;
-            // Include first 3 items to ensure we capture Preface, Forward, etc. even if they are Level 2
-            boolean isStartItem = (i < 3); 
-            
-            if (isLevel1 || isStartItem) {
+        
+        // 1. First pass: Collect strict Level 1 anchors
+        for (RawToc r : raws) {
+            if (r.getLogicalPage() > 0 && r.getTitle() != null && r.getTitle().length() >= 2 && r.getLevel() == 1) {
                 anchors.add(r);
+            }
+        }
+
+        // 2. If insufficient Level 1 anchors (less than 2), fallback to including start items (Preface, Intro, etc.)
+        if (anchors.size() < 2) {
+            System.out.println("[Align] Insufficient Level 1 anchors found (" + anchors.size() + "). Including start items...");
+            anchors.clear();
+            for (int i = 0; i < raws.size(); i++) {
+                RawToc r = raws.get(i);
+                if (r.getLogicalPage() <= 0 || r.getTitle() == null || r.getTitle().length() < 2) continue;
+                
+                boolean isLevel1 = r.getLevel() == 1;
+                // Include first 5 items to ensure we capture Preface, Forward, etc. even if they are Level 2
+                boolean isStartItem = (i < 5); 
+                
+                if (isLevel1 || isStartItem) {
+                    anchors.add(r);
+                }
             }
         }
 
@@ -336,7 +349,8 @@ public class PageAlignmentService {
                         "请以 JSON 格式输出，格式为：{\"result\": \"是\"} 或 {\"result\": \"否\"}";
                 String response = ocrEngine.doOCR(topImage, prompt).trim();
 
-                if (response.contains("是") || response.toLowerCase().contains("yes")) {
+                // Fix: Some models return "YES" or "NO" directly, or JSON with "yes"/"no"
+                if (response.contains("是") || response.toLowerCase().contains("yes") || response.contains("YES")) {
                     return offset;
                 }
             } catch (Exception e) {

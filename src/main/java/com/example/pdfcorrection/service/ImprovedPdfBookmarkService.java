@@ -182,6 +182,21 @@ public class ImprovedPdfBookmarkService {
             }
         }
 
+        if (items != null && !items.isEmpty()) {
+            logTocStructure(items);
+        }
+
         return items != null ? items : new ArrayList<>();
+    }
+
+
+    private void logTocStructure(List<TocItem> items) {
+        System.out.println("=== Final TOC Structure (After Correction) ===");
+        for (TocItem item : items) {
+            StringBuilder indent = new StringBuilder();
+            for (int k = 1; k < item.getLevel(); k++) indent.append("  ");
+            System.out.printf("%s- %s (Page: %d, Level: %d)%n", indent, item.getTitle(), item.getPage(), item.getLevel());
+        }
+        System.out.println("==============================================");
     }
 }
