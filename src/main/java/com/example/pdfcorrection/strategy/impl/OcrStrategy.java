@@ -64,6 +64,7 @@ public class OcrStrategy {
             long discoveryStart = System.currentTimeMillis();
             progressService.sendProgress("正在查找目录...");
             for (int i = 0; i < maxScan; i++) { // PDFBox page index starts at 0
+                System.out.println(">>> Scanning Page " + (i + 1) + " for TOC...");
                 try {
                     // Phase 1: Quick Scan (150 DPI)
                     long pageScanStart = System.currentTimeMillis();
@@ -80,7 +81,7 @@ public class OcrStrategy {
                         String response = discoveryEngine.doOCR(image, prompt).trim().toUpperCase();
                         long pageScanDuration = System.currentTimeMillis() - pageScanStart;
                         
-                        System.out.println("Discovery Scan Page " + i + " (LLM): " + pageScanDuration + "ms, Response=" + response);
+                        // System.out.println("Discovery Scan Page " + i + " (LLM): " + pageScanDuration + "ms, Response=" + response);
                         
                         if (response.contains("YES") || response.contains("是")) {
                             isTocPage = true;
@@ -94,14 +95,14 @@ public class OcrStrategy {
                         String cleanText = text.replaceAll("\\s+", "");
                         int tocLikeCount = TocTextParser.countTocLikeLines(text);
 
-                        System.out.println("Discovery Scan Page " + i + " (" + discoveryMode + "): " + pageScanDuration + "ms, length=" + text.length() + ", tocLines=" + tocLikeCount + ", hasKeyword=" + (cleanText.contains("目录") || cleanText.toLowerCase().contains("contents")));
+                        // System.out.println("Discovery Scan Page " + i + " (" + discoveryMode + "): " + pageScanDuration + "ms, length=" + text.length() + ", tocLines=" + tocLikeCount + ", hasKeyword=" + (cleanText.contains("目录") || cleanText.toLowerCase().contains("contents")));
 
                         isTocPage = cleanText.contains("目录") || cleanText.toLowerCase().contains("contents");
                         if (!isTocPage) {
                             int chapterPatternCount = TocTextParser.countChapterPatterns(text);
                             if (tocLikeCount >= 5 && chapterPatternCount >= 2) {
                                 isTocPage = true;
-                                System.out.println("   -> Detected as TOC by density (Lines=" + tocLikeCount + ", Patterns=" + chapterPatternCount + ")");
+                                // System.out.println("   -> Detected as TOC by density (Lines=" + tocLikeCount + ", Patterns=" + chapterPatternCount + ")");
                             }
                         }
                     }
@@ -124,7 +125,7 @@ public class OcrStrategy {
                                         "如果是，请回答“YES”；如果不是，请回答“NO”。\n" +
                                         "只回答 YES 或 NO。";
                                 String response = discoveryEngine.doOCR(nextImageLow, prompt).trim().toUpperCase();
-                                System.out.println("   > Checking continuation Page " + j + " (LLM): " + response);
+                                // System.out.println("   > Checking continuation Page " + j + " (LLM): " + response);
                                 if (response.contains("YES") || response.contains("是")) {
                                     isContinuation = true;
                                 }
@@ -180,7 +181,7 @@ public class OcrStrategy {
                                     String promptToUse = (currentPrompt != null) ? currentPrompt : initialPrompt;
                                     String batchResult = ocrEngine.doOCR(batch, promptToUse);
                                     long batchItemDuration = System.currentTimeMillis() - batchItemStart;
-                                    System.out.println("DEBUG: Batch " + (k / batchSize + 1) + " Try " + (retryCount + 1) + " Result (" + batchItemDuration + "ms):\n" + batchResult);
+                                    // System.out.println("DEBUG: Batch " + (k / batchSize + 1) + " Try " + (retryCount + 1) + " Result (" + batchItemDuration + "ms):\n" + batchResult);
 
                                     List<RawToc> batchRaws = TocTextParser.tryParseJson(batchResult);
 
@@ -280,7 +281,7 @@ public class OcrStrategy {
                                                     "**FORMATTING RULES** (Strictly follow these rules):\n" +
                                                     formatInstruction;
 
-                                            System.out.println("DEBUG: Retry Prompt Length: " + currentPrompt.length());
+                                            // System.out.println("DEBUG: Retry Prompt Length: " + currentPrompt.length());
 
                                             retryCount++;
                                             continue;

@@ -123,7 +123,7 @@ public class PageAlignmentService {
                 // Search in a wider range (e.g. 0 to 50)
                 long searchStart = System.currentTimeMillis();
                 int foundOffset = findOffsetForTitle(renderer, ocrEngine, candidate.getTitle(), assumedLogical, 0, 50, totalPages, true);
-                System.out.println("[Align] Blind Search for [" + candidate.getTitle() + "] took " + (System.currentTimeMillis() - searchStart) + "ms");
+                // System.out.println("[Align] Blind Search for [" + candidate.getTitle() + "] took " + (System.currentTimeMillis() - searchStart) + "ms");
 
                 if (foundOffset != -999) {
                     System.out.println("[Align]   > Found [" + candidate.getTitle() + "] with offset " + foundOffset + " (assuming logical " + assumedLogical + ")");
@@ -212,7 +212,7 @@ public class PageAlignmentService {
                         System.out.println("[Align]   > First chapter mismatch. Searching independently...");
                         int maxOffset = Math.max(0, secondPhysical - first.getLogicalPage());
                         int searchRange = Math.min(30, maxOffset);
-                        System.out.println("[Align]   > Constraining search range to " + searchRange + " (Max Phys: " + secondPhysical + ")");
+                        // System.out.println("[Align]   > Constraining search range to " + searchRange + " (Max Phys: " + secondPhysical + ")");
                         firstOffset = findOffsetForTitle(renderer, ocrEngine, first.getTitle(), first.getLogicalPage(), 0, searchRange, totalPages);
                     }
 
@@ -329,6 +329,8 @@ public class PageAlignmentService {
             int guessPhys = logicalPage + offset - 1;
 
             if (guessPhys < 0 || guessPhys >= totalPages) continue;
+
+            System.out.println("   > Checking Page " + (guessPhys + 1) + " for Chapter: " + title);
 
             try {
                 // Render top 50% of the page

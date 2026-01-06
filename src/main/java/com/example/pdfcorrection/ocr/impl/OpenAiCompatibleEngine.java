@@ -132,9 +132,9 @@ public class OpenAiCompatibleEngine implements OcrEngine {
             try {
                 // Debug Log: Request
                 if (attempt == 0) {
-                    System.out.println(">>> API Request [" + model + "] to " + finalBaseUrl);
-                    System.out.println("    Prompt: " + (finalPrompt.length() > 100 ? finalPrompt.substring(0, 100) + "..." : finalPrompt));
-                    System.out.println("    Images: " + images.size());
+                    // System.out.println(">>> API Request [" + model + "] to " + finalBaseUrl);
+                    // System.out.println("    Prompt: " + (finalPrompt.length() > 100 ? finalPrompt.substring(0, 100) + "..." : finalPrompt));
+                    // System.out.println("    Images: " + images.size());
                 }
 
                 ResponseEntity<Map> response = restTemplate.postForEntity(finalBaseUrl + "/chat/completions", request, Map.class);
